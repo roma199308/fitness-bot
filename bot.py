@@ -1,4 +1,7 @@
 import os
+print("ENV DATABASE_PUBLIC_URL:", os.getenv("DATABASE_PUBLIC_URL"))
+print("ENV DATABASE_URL:", os.getenv("DATABASE_URL"))
+print("ALL DATABASE ENV:", [k for k in os.environ.keys() if "DATABASE" in k])
 import asyncpg
 import asyncio
 from aiogram import Bot, Dispatcher, F
