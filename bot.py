@@ -8,8 +8,13 @@ from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.client.default import DefaultBotProperties
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_PUBLIC_URL")
+DATABASE_URL = (
+    os.getenv("DATABASE_PUBLIC_URL")
+    or os.getenv("DATABASE_URL")
+)
 
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL не найден")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не найден")
 
