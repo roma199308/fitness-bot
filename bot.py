@@ -3,7 +3,7 @@ import asyncio
 from datetime import date, timedelta
 
 import asyncpg
-from dotenv import load_dotenv
+from dotenv import load_dotenvif user.get("is_registered"):
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
@@ -233,7 +233,7 @@ async def start(message: Message):
     user_id = message.from_user.id
     user = await get_user(user_id)
 
-    if user["is_registered"]:
+    if user and user.get("is_registered"):user.get("is_registered")
         await message.answer("Главное меню:", reply_markup=main_keyboard)
         return
 
@@ -251,7 +251,7 @@ async def dashboard(message: Message):
     user_id = message.from_user.id
     user = await get_user(user_id)
 
-    if not user["is_registered"]:
+    if not user.get("is_registered"):
         await message.answer("Сначала нажми /start и заполни данные.")
         return
 
@@ -278,7 +278,7 @@ async def dashboard(message: Message):
 async def forecast(message: Message):
     user = await get_user(message.from_user.id)
 
-    if not user["is_registered"]:
+    if not user.get("is_registered"):
         await message.answer("Сначала нажми /start и заполни данные.")
         return
 
