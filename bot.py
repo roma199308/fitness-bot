@@ -380,6 +380,17 @@ async def menu(message: Message):
     await message.answer("Главное меню:", reply_markup=main_keyboard)
 
 
+@dp.message(Command("reset"))
+async def reset_start(message: Message):
+    states[message.from_user.id] = {"flow": "reset", "step": "confirm", "data": {}}
+    await message.answer(
+        "⚠️ <b>Подтверждение сброса</b>\n\n"
+        "Это удалит твой профиль, вес, отчеты, тренировки, замеры и историю.\n\n"
+        "Чтобы подтвердить, напиши точно:\n"
+        "<b>ПОДТВЕРЖДАЮ</b>"
+    )
+
+
 @dp.message(Command("health"))
 async def health(message: Message):
     try:
@@ -523,6 +534,8 @@ async def handler(message: Message):
             await settings_flow(message, state, text)
         elif flow == "measurements":
             await measurements_flow(message, state, text)
+        elif flow == "reset":
+            await reset_flow(message, text)
     except ValueError:
         await message.answer("Введи число в правильном формате.")
 
@@ -812,6 +825,33 @@ async def monthly_reminder_job():
             print("monthly_reminder error:", e)
 
 
+
+async def reset_flow(message: Message, text: str):
+    user_id = message.from_user.id
+
+    if text.strip() != "ПОДТВЕРЖДАЮ":
+        await message.answer(
+            "Сброс не выполнен.\n\n"
+            "Если действительно хочешь удалить все данные, напиши: <b>ПОДТВЕРЖДАЮ</b>\n"
+            "Или напиши <b>Отмена</b>."
+        )
+        return
+
+    await execute("DELETE FROM monthly_reports WHERE user_id=$1", user_id)
+    await execute("DELETE FROM weekly_summaries WHERE user_id=$1", user_id)
+    await execute("DELETE FROM body_measurements WHERE user_id=$1", user_id)
+    await execute("DELETE FROM weight_logs WHERE user_id=$1", user_id)
+    await execute("DELETE FROM workouts WHERE user_id=$1", user_id)
+    await execute("DELETE FROM daily_reports WHERE user_id=$1", user_id)
+    await execute("DELETE FROM users WHERE user_id=$1", user_id)
+
+    states.pop(user_id, None)
+
+    await message.answer(
+        "✅ Профиль полностью сброшен.\n\n"
+        "Нажми /start, чтобы настроить бота заново."
+    )
+
 async def main():
     global pool
     for i in range(10):
@@ -829,8 +869,8 @@ async def main():
     await create_tables()
 
     scheduler = AsyncIOScheduler(timezone=TZ)
-    scheduler.add_job(daily_reminder_job, "cron", hour=22, minute=0)
-    scheduler.add_job(weekly_reminder_job, "cron", day_of_week="sun", hour=22, minute=30)
+    scheduler.add_job(daily_reminder_job, "cron", hour=20, minute=0)
+    scheduler.add_job(weekly_reminder_job, "cron", day_of_week="sun", hour=20, minute=30)
     scheduler.add_job(monthly_reminder_job, "cron", day=1, hour=9, minute=0)
     scheduler.start()
 
