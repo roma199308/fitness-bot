@@ -829,8 +829,8 @@ async def main():
     await create_tables()
 
     scheduler = AsyncIOScheduler(timezone=TZ)
-    scheduler.add_job(daily_reminder_job, "cron", hour=20, minute=0)
-    scheduler.add_job(weekly_reminder_job, "cron", day_of_week="sun", hour=20, minute=30)
+    scheduler.add_job(daily_reminder_job, "cron", hour=22, minute=0)
+    scheduler.add_job(weekly_reminder_job, "cron", day_of_week="sun", hour=22, minute=30)
     scheduler.add_job(monthly_reminder_job, "cron", day=1, hour=9, minute=0)
     scheduler.start()
 
