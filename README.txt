@@ -1,5 +1,6 @@
-1. Заменить bot.py
-2. Заменить requirements.txt
-3. Удалить DB_PATH
-4. Оставить DATABASE_PUBLIC_URL
-5. Commit changes
+Fitness Bot PostgreSQL full working version
+
+Railway variables:
+BOT_TOKEN=...
+DATABASE_URL=postgresql://...
+BOT_TZ=Europe/Kyiv
