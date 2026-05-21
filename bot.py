@@ -364,6 +364,176 @@ async def forecast_text(user_id, user):
     return f"📌 Осталось: {left:.1f} кг\n⚡ Темп: {kg_per_day * 30:.1f} кг/месяц\n🎯 Прогноз цели: {target_date.strftime('%d.%m.%Y')}"
 
 
+
+def detailed_day_index(user, calories, burned, report_exists=True):
+    goal = user["daily_calorie_goal"] or 1600
+    workout_goal = training_target(user["current_weight"])
+
+    if not report_exists:
+        return {"food": 0, "activity": 0, "discipline": 0, "balance": 0, "total": 0, "label": "🔴 Нет отчета"}
+
+    if calories is None:
+        food_score = 35
+    elif calories <= goal:
+        food_score = 100
+    elif calories <= goal * 1.10:
+        food_score = 75
+    elif calories <= goal * 1.25:
+        food_score = 45
+    else:
+        food_score = 20
+
+    activity_score = min(100, round((burned or 0) / workout_goal * 100)) if workout_goal else 0
+    discipline_score = 100 if calories is not None else 55
+
+    if calories is None:
+        balance_score = 50
+    else:
+        net = calories - (burned or 0)
+        if net <= goal:
+            balance_score = 100
+        elif net <= goal * 1.10:
+            balance_score = 75
+        elif net <= goal * 1.25:
+            balance_score = 45
+        else:
+            balance_score = 20
+
+    total = round(food_score * 0.40 + activity_score * 0.30 + discipline_score * 0.15 + balance_score * 0.15)
+
+    if total >= 85:
+        label = "🟢 Отличный день"
+    elif total >= 65:
+        label = "🟡 Нормальный день"
+    else:
+        label = "🔴 Ниже плана"
+
+    return {"food": food_score, "activity": activity_score, "discipline": discipline_score, "balance": balance_score, "total": total, "label": label}
+
+
+def ai_day_text(user, calories, burned, workouts_count, counted=True):
+    goal = user["daily_calorie_goal"] or 1600
+    workout_goal = training_target(user["current_weight"])
+
+    if not counted:
+        return (
+            "🧠 <b>AI-анализ дня</b>\n\n"
+            "Сегодня калории не считались, поэтому точный вывод по питанию сделать нельзя.\n"
+            f"По активности: сожжено {burned} ккал при ориентире около {workout_goal} ккал.\n\n"
+            "Рекомендация: завтра лучше хотя бы примерно зафиксировать питание — даже грубая оценка полезнее пустого дня."
+        )
+
+    if calories <= goal and burned >= workout_goal:
+        return (
+            "🧠 <b>AI-анализ дня</b>\n\n"
+            "🔥 Отличный день: ты уложился в лимит калорий и закрыл активность.\n"
+            "Это хороший сценарий для снижения веса без лишнего хаоса.\n\n"
+            "Рекомендация: просто повторить такой день еще раз."
+        )
+
+    if calories <= goal and burned < workout_goal:
+        return (
+            "🧠 <b>AI-анализ дня</b>\n\n"
+            "🟡 По питанию день хороший — лимит удержан.\n"
+            "Активность ниже ориентира, но это не критично, если завтра будет тренировка или больше движения.\n\n"
+            "Рекомендация: добавить короткое кардио/прогулку в следующий день."
+        )
+
+    if calories > goal and burned >= workout_goal:
+        return (
+            "🧠 <b>AI-анализ дня</b>\n\n"
+            "🟡 Калории были выше плана, но тренировка частично компенсировала перебор.\n"
+            "День не провален, но питание лучше держать ровнее.\n\n"
+            "Рекомендация: завтра сделать обычный день без попытки жестко 'отработать' перебор."
+        )
+
+    return (
+        "🧠 <b>AI-анализ дня</b>\n\n"
+        "🔴 Сегодня день ниже плана: калории выше цели, а активности было недостаточно.\n"
+        "Это не проблема, если не превращать один день в серию.\n\n"
+        "Рекомендация: завтра сфокусироваться на простом плане — лимит калорий + любая активность."
+    )
+
+
+async def build_week_ai_analysis(user_id):
+    user = await get_user(user_id)
+    today = date.today()
+    week_start = today - timedelta(days=today.weekday())
+    week_end = week_start + timedelta(days=6)
+
+    reports = await fetch(
+        "SELECT * FROM daily_reports WHERE user_id=$1 AND report_date BETWEEN $2 AND $3 ORDER BY report_date",
+        user_id, week_start, week_end
+    )
+    workouts = await fetch(
+        "SELECT * FROM workouts WHERE user_id=$1 AND workout_date BETWEEN $2 AND $3 ORDER BY workout_date",
+        user_id, week_start, week_end
+    )
+    weights = await fetch(
+        "SELECT * FROM weight_logs WHERE user_id=$1 AND weight_date BETWEEN $2 AND $3 ORDER BY weight_date",
+        user_id, week_start, week_end
+    )
+
+    if not reports and not workouts and not weights:
+        return "🧠 <b>AI-анализ недели</b>\n\nПока нет данных за эту неделю. Внеси хотя бы один дневной отчет."
+
+    counted_reports = [r for r in reports if r["calories_counted"]]
+    not_counted = len([r for r in reports if not r["calories_counted"]])
+    no_workout_days = len([r for r in reports if r["no_workout"]])
+    total_in = sum(r["calories_in"] or 0 for r in counted_reports)
+    total_out = sum(w["calories_burned"] for w in workouts)
+    avg_in = round(total_in / len(counted_reports)) if counted_reports else 0
+    workout_days = len(set(w["workout_date"] for w in workouts))
+    goal = user["daily_calorie_goal"] or 1600
+
+    weight_text = "по весу пока мало данных"
+    if len(weights) >= 2:
+        delta = weights[-1]["weight"] - weights[0]["weight"]
+        weight_text = f"вес за неделю: {weights[0]['weight']:g} → {weights[-1]['weight']:g} кг ({delta:+.1f} кг)"
+
+    good_food_days = 0
+    over_days = 0
+    for r in counted_reports:
+        if (r["calories_in"] or 0) <= goal:
+            good_food_days += 1
+        else:
+            over_days += 1
+
+    if good_food_days >= 5 and workout_days >= 3:
+        verdict = "🔥 Неделя сильная: питание в основном под контролем, активность хорошая."
+    elif good_food_days >= 4:
+        verdict = "🟡 Неделя нормальная: питание в целом держится, но активность можно усилить."
+    elif over_days >= 3:
+        verdict = "🔴 Главная проблема недели — переборы по калориям."
+    else:
+        verdict = "🟡 Неделя смешанная: есть хорошие дни, но не хватает стабильности."
+
+    recommendations = []
+    if not_counted:
+        recommendations.append(f"— {not_counted} дн. без подсчета: лучше хотя бы примерно фиксировать калории.")
+    if workout_days < 3:
+        recommendations.append("— добавить 1–2 тренировки или кардио-дня.")
+    if over_days >= 2:
+        recommendations.append("— заранее планировать питание в дни, где обычно перебор.")
+    if not recommendations:
+        recommendations.append("— продолжать текущий режим, он выглядит рабочим.")
+
+    return (
+        f"🧠 <b>AI-анализ недели</b>\n"
+        f"{week_start.strftime('%d.%m')} — {week_end.strftime('%d.%m')}\n\n"
+        f"{verdict}\n\n"
+        f"📊 <b>Цифры недели</b>\n"
+        f"🍽 Съедено: {total_in} ккал\n"
+        f"🍽 Среднее: {avg_in} ккал/день подсчета\n"
+        f"🔥 Сожжено: {total_out} ккал\n"
+        f"🏋️ Дней с тренировками: {workout_days}\n"
+        f"❔ Без подсчета калорий: {not_counted}\n"
+        f"🚫 Без тренировки: {no_workout_days}\n"
+        f"⚖️ {weight_text}\n\n"
+        f"🎯 <b>Рекомендации</b>\n" + "\n".join(recommendations)
+    )
+
+
 @dp.message(CommandStart())
 async def start(message: Message):
     user_id = message.from_user.id
@@ -409,7 +579,9 @@ async def dashboard(message: Message):
         return
     _, workouts, calories, burned, counted, no_workout = await today_stats(user_id)
     total, lost, left, percent = calc_progress(user)
-    score, label = calc_day_index(user, calories, burned)
+    index = detailed_day_index(user, calories, burned, report_exists=bool(_))
+    score = index["total"]
+    label = index["label"]
     cal_text = "не считал" if not counted else f"{calories or 0} ккал"
     age = age_from_birth(user["birth_date"])
     await message.answer(
@@ -423,7 +595,10 @@ async def dashboard(message: Message):
         f"🍽 Сегодня: {cal_text}\n"
         f"🔥 Сожжено: {burned} ккал\n"
         f"🏋️ Тренировок: {len(workouts)}\n"
-        f"❤️ Индекс: {score}/100 {label}"
+        f"❤️ Индекс: {score}/100 {label}\n"
+        f"🍽 Питание: {index['food']}/100\n"
+        f"🏋️ Активность: {index['activity']}/100\n"
+        f"🔥 Баланс: {index['balance']}/100"
     )
 
 
@@ -486,6 +661,12 @@ async def week_history(message: Message):
         await message.answer("Истории недель пока нет.")
         return
     await message.answer("🗂 <b>История недель</b>\n\n" + "\n\n".join(r["summary_text"] for r in rows))
+
+
+@dp.message(F.text == "🧠 AI-анализ недели")
+async def ai_week(message: Message):
+    text = await build_week_ai_analysis(message.from_user.id)
+    await message.answer(text)
 
 
 @dp.message(F.text == "⚙️ Настройки")
@@ -628,6 +809,15 @@ async def save_daily(message, data):
     states.pop(user_id, None)
     await message.answer("✅ Отчет за день сохранен.", reply_markup=main_keyboard)
     await dashboard(message)
+    burned = sum(w["calories"] for w in data.get("workouts", []))
+    user = await get_user(user_id)
+    await message.answer(ai_day_text(
+        user,
+        data.get("calories_in"),
+        burned,
+        len(data.get("workouts", [])),
+        counted=data.get("calories_counted", True)
+    ))
 
 
 async def weight_flow(message, text):
