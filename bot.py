@@ -334,6 +334,22 @@ async def start(message: Message):
 async def menu(message: Message):
     await message.answer("Главное меню:", reply_markup=main_keyboard)
 
+@dp.message(Command("reset"))
+async def reset_profile(message: Message):
+    user_id = message.from_user.id
+
+    await execute("DELETE FROM monthly_reports WHERE user_id=$1", user_id)
+    await execute("DELETE FROM weekly_summaries WHERE user_id=$1", user_id)
+    await execute("DELETE FROM body_measurements WHERE user_id=$1", user_id)
+    await execute("DELETE FROM weight_logs WHERE user_id=$1", user_id)
+    await execute("DELETE FROM workouts WHERE user_id=$1", user_id)
+    await execute("DELETE FROM daily_reports WHERE user_id=$1", user_id)
+    await execute("DELETE FROM users WHERE user_id=$1", user_id)
+
+    states.pop(user_id, None)
+
+    await message.answer("✅ Профиль сброшен. Нажми /start и заполни данные заново.")
+
 
 @dp.message(F.text == "📊 Мини-дашборд")
 async def dashboard(message: Message):
