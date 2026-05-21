@@ -2,6 +2,7 @@
 import os
 import asyncio
 from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import asyncpg
 from dotenv import load_dotenv
@@ -10,11 +11,14 @@ from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.client.default import DefaultBotProperties
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 load_dotenv()
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL") or os.getenv("DATABASE_PUBLIC_URL")
+BOT_TZ = os.getenv("BOT_TZ", "Europe/Kyiv")
+TZ = ZoneInfo(BOT_TZ)
 
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN не найден")
@@ -68,85 +72,60 @@ settings_keyboard = ReplyKeyboardMarkup(
 )
 
 
+async def recreate_pool():
+    global pool
+    try:
+        if pool:
+            await pool.close()
+    except Exception:
+        pass
+
+    pool = await asyncpg.create_pool(
+        DATABASE_URL,
+        min_size=1,
+        max_size=5,
+        command_timeout=60,
+        max_inactive_connection_lifetime=30,
+    )
+
+
 async def execute(query, *args):
     global pool
-
-    for _ in range(3):
+    for attempt in range(3):
         try:
             async with pool.acquire() as conn:
                 return await conn.execute(query, *args)
-
         except Exception as e:
-            print("DB execute retry:", e)
-
-            try:
-                pool = await asyncpg.create_pool(
-                    DATABASE_URL,
-                    min_size=1,
-                    max_size=5,
-                    command_timeout=60,
-                    max_inactive_connection_lifetime=30
-                )
-            except:
-                pass
-
+            print(f"DB execute retry {attempt + 1}/3:", e)
             await asyncio.sleep(2)
-
-    raise RuntimeError("PostgreSQL execute failed")
+            await recreate_pool()
+    raise RuntimeError("PostgreSQL execute failed after retries")
 
 
 async def fetchrow(query, *args):
     global pool
-
-    for _ in range(3):
+    for attempt in range(3):
         try:
             async with pool.acquire() as conn:
                 return await conn.fetchrow(query, *args)
-
         except Exception as e:
-            print("DB fetchrow retry:", e)
-
-            try:
-                pool = await asyncpg.create_pool(
-                    DATABASE_URL,
-                    min_size=1,
-                    max_size=5,
-                    command_timeout=60,
-                    max_inactive_connection_lifetime=30
-                )
-            except:
-                pass
-
+            print(f"DB fetchrow retry {attempt + 1}/3:", e)
             await asyncio.sleep(2)
-
-    raise RuntimeError("PostgreSQL fetchrow failed")
+            await recreate_pool()
+    raise RuntimeError("PostgreSQL fetchrow failed after retries")
 
 
 async def fetch(query, *args):
     global pool
-
-    for _ in range(3):
+    for attempt in range(3):
         try:
             async with pool.acquire() as conn:
                 return await conn.fetch(query, *args)
-
         except Exception as e:
-            print("DB fetch retry:", e)
-
-            try:
-                pool = await asyncpg.create_pool(
-                    DATABASE_URL,
-                    min_size=1,
-                    max_size=5,
-                    command_timeout=60,
-                    max_inactive_connection_lifetime=30
-                )
-            except:
-                pass
-
+            print(f"DB fetch retry {attempt + 1}/3:", e)
             await asyncio.sleep(2)
-
-    raise RuntimeError("PostgreSQL fetch failed")
+            await recreate_pool()
+    raise RuntimeError("PostgreSQL fetch failed after retries")
 
 
 async def create_tables():
@@ -400,21 +379,14 @@ async def start(message: Message):
 async def menu(message: Message):
     await message.answer("Главное меню:", reply_markup=main_keyboard)
 
-@dp.message(Command("reset"))
-async def reset_profile(message: Message):
-    user_id = message.from_user.id
 
-    await execute("DELETE FROM monthly_reports WHERE user_id=$1", user_id)
-    await execute("DELETE FROM weekly_summaries WHERE user_id=$1", user_id)
-    await execute("DELETE FROM body_measurements WHERE user_id=$1", user_id)
-    await execute("DELETE FROM weight_logs WHERE user_id=$1", user_id)
-    await execute("DELETE FROM workouts WHERE user_id=$1", user_id)
-    await execute("DELETE FROM daily_reports WHERE user_id=$1", user_id)
-    await execute("DELETE FROM users WHERE user_id=$1", user_id)
-
-    states.pop(user_id, None)
-
-    await message.answer("✅ Профиль сброшен. Нажми /start и заполни данные заново.")
+@dp.message(Command("health"))
+async def health(message: Message):
+    try:
+        await fetchrow("SELECT 1")
+        await message.answer("✅ Бот работает. PostgreSQL подключен.")
+    except Exception as e:
+        await message.answer(f"⚠️ Бот запущен, но есть проблема с БД: {e}")
 
 
 @dp.message(F.text == "📊 Мини-дашборд")
@@ -812,20 +784,57 @@ async def save_current_week_summary(user_id):
     return text
 
 
+async def daily_reminder_job():
+    users = await fetch("SELECT user_id FROM users WHERE is_registered=TRUE")
+    for user in users:
+        try:
+            await bot.send_message(user["user_id"], "⏰ Напоминание: внеси отчет за день — калории и тренировки.", reply_markup=main_keyboard)
+        except Exception as e:
+            print("daily_reminder error:", e)
+
+
+async def weekly_reminder_job():
+    users = await fetch("SELECT user_id FROM users WHERE is_registered=TRUE")
+    for user in users:
+        try:
+            text = await save_current_week_summary(user["user_id"])
+            await bot.send_message(user["user_id"], text)
+        except Exception as e:
+            print("weekly_reminder error:", e)
+
+
+async def monthly_reminder_job():
+    users = await fetch("SELECT user_id FROM users WHERE is_registered=TRUE")
+    for user in users:
+        try:
+            await bot.send_message(user["user_id"], "📅 Новый месяц: внеси вес и замеры месяца, потом сформируй отчет за месяц.", reply_markup=main_keyboard)
+        except Exception as e:
+            print("monthly_reminder error:", e)
+
+
 async def main():
     global pool
     for i in range(10):
         try:
-            pool = await asyncpg.create_pool(     DATABASE_URL,     min_size=1,     max_size=5,     command_timeout=60,     max_inactive_connection_lifetime=30 )
+            await recreate_pool()
             print("PostgreSQL connected")
             break
         except Exception as e:
             print(f"DB retry {i + 1}/10:", e)
             await asyncio.sleep(5)
+
     if pool is None:
         raise RuntimeError("Не удалось подключиться к PostgreSQL")
+
     await create_tables()
-    print("Fitness bot PostgreSQL full v2 started")
+
+    scheduler = AsyncIOScheduler(timezone=TZ)
+    scheduler.add_job(daily_reminder_job, "cron", hour=20, minute=0)
+    scheduler.add_job(weekly_reminder_job, "cron", day_of_week="sun", hour=20, minute=30)
+    scheduler.add_job(monthly_reminder_job, "cron", day=1, hour=9, minute=0)
+    scheduler.start()
+
+    print("Fitness bot PostgreSQL safe v2.2 started")
     await dp.start_polling(bot)
 
 
