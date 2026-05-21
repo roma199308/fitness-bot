@@ -233,12 +233,19 @@ async def start(message: Message):
     user_id = message.from_user.id
     user = await get_user(user_id)
 
-    if user and user.get("is_registered"):user.get("is_registered")
+    if user and user.get("is_registered"):
         await message.answer("Главное меню:", reply_markup=main_keyboard)
         return
 
-    states[user_id] = {"flow": "registration", "step": "start_weight", "data": {}}
-    await message.answer("Привет! Настроим цель.\n\n1/5 Введи текущий вес, например: 101.3")
+    states[user_id] = {
+        "flow": "registration",
+        "step": "start_weight",
+        "data": {}
+    }
+
+    await message.answer(
+        "Привет! Настроим цель.\n\n1/5 Введи текущий вес, например: 101.3"
+    )
 
 
 @dp.message(Command("menu"))
