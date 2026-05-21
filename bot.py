@@ -32,7 +32,8 @@ main_keyboard = ReplyKeyboardMarkup(
         [KeyboardButton(text="📊 Мини-дашборд"), KeyboardButton(text="📈 Прогноз цели")],
         [KeyboardButton(text="⚖️ Внести вес"), KeyboardButton(text="📏 Замеры месяца")],
         [KeyboardButton(text="📅 Отчет за месяц"), KeyboardButton(text="🗂 История месяцев")],
-        [KeyboardButton(text="🗂 История недель"), KeyboardButton(text="⚙️ Настройки")],
+        [KeyboardButton(text="📌 Отчет за неделю"), KeyboardButton(text="🗂 История недель")],
+        [KeyboardButton(text="⚙️ Настройки")],
     ],
     resize_keyboard=True
 )
@@ -170,6 +171,29 @@ async def create_tables():
         UNIQUE(user_id, report_month)
     )
     """)
+
+    # Миграции для старых таблиц, если база была создана предыдущей версией
+    await execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS start_weight DOUBLE PRECISION")
+    await execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS current_weight DOUBLE PRECISION")
+    await execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS target_weight DOUBLE PRECISION")
+    await execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS height_cm DOUBLE PRECISION")
+    await execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS birth_date DATE")
+    await execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_calorie_goal INT DEFAULT 1600")
+    await execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_registered BOOLEAN DEFAULT FALSE")
+
+    await execute("ALTER TABLE daily_reports ADD COLUMN IF NOT EXISTS calories_in INT")
+    await execute("ALTER TABLE daily_reports ADD COLUMN IF NOT EXISTS calories_counted BOOLEAN DEFAULT TRUE")
+    await execute("ALTER TABLE daily_reports ADD COLUMN IF NOT EXISTS no_workout BOOLEAN DEFAULT FALSE")
+
+    await execute("ALTER TABLE body_measurements ADD COLUMN IF NOT EXISTS chest_cm DOUBLE PRECISION")
+    await execute("ALTER TABLE body_measurements ADD COLUMN IF NOT EXISTS biceps_cm DOUBLE PRECISION")
+    await execute("ALTER TABLE body_measurements ADD COLUMN IF NOT EXISTS forearm_cm DOUBLE PRECISION")
+    await execute("ALTER TABLE body_measurements ADD COLUMN IF NOT EXISTS belly_cm DOUBLE PRECISION")
+    await execute("ALTER TABLE body_measurements ADD COLUMN IF NOT EXISTS hips_cm DOUBLE PRECISION")
+    await execute("ALTER TABLE body_measurements ADD COLUMN IF NOT EXISTS thigh_cm DOUBLE PRECISION")
+    await execute("ALTER TABLE body_measurements ADD COLUMN IF NOT EXISTS calf_cm DOUBLE PRECISION")
+    await execute("ALTER TABLE body_measurements ADD COLUMN IF NOT EXISTS neck_cm DOUBLE PRECISION")
+
 
 
 async def ensure_user(user_id):
@@ -381,6 +405,12 @@ async def month_history(message: Message):
         return
     for r in rows:
         await message.answer(r["report_text"])
+
+
+@dp.message(F.text == "📌 Отчет за неделю")
+async def week_report(message: Message):
+    text = await save_current_week_summary(message.from_user.id)
+    await message.answer(text)
 
 
 @dp.message(F.text == "🗂 История недель")
@@ -697,6 +727,7 @@ async def save_current_week_summary(user_id):
             no_workout_days=EXCLUDED.no_workout_days,
             summary_text=EXCLUDED.summary_text
     """, user_id, start, end, total_in, total_out, not_counted, no_workout, text)
+    return text
 
 
 async def main():

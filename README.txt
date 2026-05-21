@@ -1,13 +1,12 @@
-Fitness Bot PostgreSQL Full v2
+Fitness Bot PostgreSQL Full v2.1
 
-Что добавлено:
-- дата рождения вместо возраста
-- возраст считается автоматически
-- замеры тела 1 раз в месяц
-- месячный отчет
-- история месяцев
-- история недель
-- учет дней без подсчета калорий
-- учет дней без тренировки
+Фиксы:
+- добавлена кнопка 📌 Отчет за неделю
+- исправлена ошибка KeyError: birth_date
+- добавлены миграции для старых таблиц PostgreSQL
 
-Для полного сброса БД выполни SQL из reset_database.sql в Railway Postgres → Database.
+Замени в GitHub:
+- bot.py
+- requirements.txt
+
+После commit Railway сделает redeploy.
