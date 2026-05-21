@@ -69,18 +69,84 @@ settings_keyboard = ReplyKeyboardMarkup(
 
 
 async def execute(query, *args):
-    async with pool.acquire() as conn:
-        return await conn.execute(query, *args)
+    global pool
+
+    for _ in range(3):
+        try:
+            async with pool.acquire() as conn:
+                return await conn.execute(query, *args)
+
+        except Exception as e:
+            print("DB execute retry:", e)
+
+            try:
+                pool = await asyncpg.create_pool(
+                    DATABASE_URL,
+                    min_size=1,
+                    max_size=5,
+                    command_timeout=60,
+                    max_inactive_connection_lifetime=30
+                )
+            except:
+                pass
+
+            await asyncio.sleep(2)
+
+    raise RuntimeError("PostgreSQL execute failed")
 
 
 async def fetchrow(query, *args):
-    async with pool.acquire() as conn:
-        return await conn.fetchrow(query, *args)
+    global pool
+
+    for _ in range(3):
+        try:
+            async with pool.acquire() as conn:
+                return await conn.fetchrow(query, *args)
+
+        except Exception as e:
+            print("DB fetchrow retry:", e)
+
+            try:
+                pool = await asyncpg.create_pool(
+                    DATABASE_URL,
+                    min_size=1,
+                    max_size=5,
+                    command_timeout=60,
+                    max_inactive_connection_lifetime=30
+                )
+            except:
+                pass
+
+            await asyncio.sleep(2)
+
+    raise RuntimeError("PostgreSQL fetchrow failed")
 
 
 async def fetch(query, *args):
-    async with pool.acquire() as conn:
-        return await conn.fetch(query, *args)
+    global pool
+
+    for _ in range(3):
+        try:
+            async with pool.acquire() as conn:
+                return await conn.fetch(query, *args)
+
+        except Exception as e:
+            print("DB fetch retry:", e)
+
+            try:
+                pool = await asyncpg.create_pool(
+                    DATABASE_URL,
+                    min_size=1,
+                    max_size=5,
+                    command_timeout=60,
+                    max_inactive_connection_lifetime=30
+                )
+            except:
+                pass
+
+            await asyncio.sleep(2)
+
+    raise RuntimeError("PostgreSQL fetch failed")
 
 
 async def create_tables():
@@ -750,7 +816,7 @@ async def main():
     global pool
     for i in range(10):
         try:
-            pool = await asyncpg.create_pool(DATABASE_URL)
+            pool = await asyncpg.create_pool(     DATABASE_URL,     min_size=1,     max_size=5,     command_timeout=60,     max_inactive_connection_lifetime=30 )
             print("PostgreSQL connected")
             break
         except Exception as e:
