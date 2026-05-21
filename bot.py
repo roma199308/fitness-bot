@@ -63,8 +63,14 @@ async def start(message: Message):
 async def main():
     global pool
 
-    pool = await asyncpg.create_pool(DATABASE_URL)
-
+  for i in range(10):
+    try:
+        pool = await asyncpg.create_pool(DATABASE_URL)
+        print("PostgreSQL connected")
+        break
+    except Exception as e:
+        print(f"DB connection retry {i+1}/10:", e)
+        await asyncio.sleep(5)
     await create_tables()
 
     print("Fitness bot PostgreSQL started")
