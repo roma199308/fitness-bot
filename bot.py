@@ -3,7 +3,7 @@ import asyncio
 from datetime import date, timedelta
 
 import asyncpg
-from dotenv import load_dotenvif user.get("is_registered"):
+from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
