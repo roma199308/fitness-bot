@@ -1,6 +1,13 @@
-Fitness Bot PostgreSQL full working version
+Fitness Bot PostgreSQL Full v2
 
-Railway variables:
-BOT_TOKEN=...
-DATABASE_URL=postgresql://...
-BOT_TZ=Europe/Kyiv
+Что добавлено:
+- дата рождения вместо возраста
+- возраст считается автоматически
+- замеры тела 1 раз в месяц
+- месячный отчет
+- история месяцев
+- история недель
+- учет дней без подсчета калорий
+- учет дней без тренировки
+
+Для полного сброса БД выполни SQL из reset_database.sql в Railway Postgres → Database.

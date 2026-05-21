@@ -1,6 +1,7 @@
+
 import os
 import asyncio
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import asyncpg
 from dotenv import load_dotenv
@@ -29,8 +30,9 @@ main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📝 Внести отчет за день")],
         [KeyboardButton(text="📊 Мини-дашборд"), KeyboardButton(text="📈 Прогноз цели")],
-        [KeyboardButton(text="⚖️ Внести вес"), KeyboardButton(text="⚙️ Настройки")],
-        [KeyboardButton(text="💾 Backup")]
+        [KeyboardButton(text="⚖️ Внести вес"), KeyboardButton(text="📏 Замеры месяца")],
+        [KeyboardButton(text="📅 Отчет за месяц"), KeyboardButton(text="🗂 История месяцев")],
+        [KeyboardButton(text="🗂 История недель"), KeyboardButton(text="⚙️ Настройки")],
     ],
     resize_keyboard=True
 )
@@ -88,7 +90,7 @@ async def create_tables():
         current_weight DOUBLE PRECISION,
         target_weight DOUBLE PRECISION,
         height_cm DOUBLE PRECISION,
-        age INT,
+        birth_date DATE,
         daily_calorie_goal INT DEFAULT 1600,
         is_registered BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP DEFAULT NOW()
@@ -125,6 +127,49 @@ async def create_tables():
         created_at TIMESTAMP DEFAULT NOW()
     )
     """)
+    await execute("""
+    CREATE TABLE IF NOT EXISTS body_measurements (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL,
+        measure_month TEXT NOT NULL,
+        measure_date DATE NOT NULL DEFAULT CURRENT_DATE,
+        chest_cm DOUBLE PRECISION,
+        biceps_cm DOUBLE PRECISION,
+        forearm_cm DOUBLE PRECISION,
+        belly_cm DOUBLE PRECISION,
+        hips_cm DOUBLE PRECISION,
+        thigh_cm DOUBLE PRECISION,
+        calf_cm DOUBLE PRECISION,
+        neck_cm DOUBLE PRECISION,
+        created_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(user_id, measure_month)
+    )
+    """)
+    await execute("""
+    CREATE TABLE IF NOT EXISTS weekly_summaries (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL,
+        week_start DATE NOT NULL,
+        week_end DATE NOT NULL,
+        total_calories_in INT,
+        total_calories_out INT,
+        not_counted_days INT,
+        no_workout_days INT,
+        summary_text TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(user_id, week_start, week_end)
+    )
+    """)
+    await execute("""
+    CREATE TABLE IF NOT EXISTS monthly_reports (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL,
+        report_month TEXT NOT NULL,
+        report_text TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(user_id, report_month)
+    )
+    """)
 
 
 async def ensure_user(user_id):
@@ -142,6 +187,41 @@ def to_float(text):
 
 def to_int(text):
     return int(round(to_float(text)))
+
+
+def parse_birth_date(text):
+    return datetime.strptime(text.strip(), "%d.%m.%Y").date()
+
+
+def age_from_birth(birth_date):
+    if not birth_date:
+        return None
+    today = date.today()
+    return today.year - birth_date.year - ((today.month, today.day) < (birth_date.month, birth_date.day))
+
+
+def month_key(d=None):
+    d = d or date.today()
+    return f"{d.year:04d}-{d.month:02d}"
+
+
+def previous_month_key():
+    first = date.today().replace(day=1)
+    prev = first - timedelta(days=1)
+    return month_key(prev)
+
+
+def month_bounds(key=None):
+    if key:
+        y, m = map(int, key.split("-"))
+        start = date(y, m, 1)
+    else:
+        start = date.today().replace(day=1)
+    if start.month == 12:
+        end = date(start.year + 1, 1, 1) - timedelta(days=1)
+    else:
+        end = date(start.year, start.month + 1, 1) - timedelta(days=1)
+    return start, end
 
 
 def progress_bar(percent, size=10):
@@ -193,59 +273,37 @@ async def today_stats(user_id):
     workout_rows = await fetch("SELECT * FROM workouts WHERE user_id=$1 AND workout_date=$2 ORDER BY id ASC", user_id, today)
     calories = report["calories_in"] if report else None
     counted = report["calories_counted"] if report else False
+    no_workout = report["no_workout"] if report else False
     burned = sum(w["calories_burned"] for w in workout_rows)
-    return report, workout_rows, calories, burned, counted
+    return report, workout_rows, calories, burned, counted, no_workout
 
 
 async def forecast_text(user_id, user):
     total, lost, left, percent = calc_progress(user)
     if left <= 0 and user["target_weight"]:
         return "🎉 Цель уже достигнута"
-
-    weight_rows = await fetch(
-        "SELECT weight_date, weight FROM weight_logs WHERE user_id=$1 ORDER BY weight_date ASC",
-        user_id
-    )
-
-    if len(weight_rows) < 2:
+    ws = await fetch("SELECT weight_date, weight FROM weight_logs WHERE user_id=$1 ORDER BY weight_date ASC", user_id)
+    if len(ws) < 2:
         return "Пока мало данных для прогноза. Внеси вес минимум 2 раза."
-
-    first = weight_rows[0]
-    last = weight_rows[-1]
+    first, last = ws[0], ws[-1]
     days = max(1, (last["weight_date"] - first["weight_date"]).days)
     kg_lost = first["weight"] - last["weight"]
-
     if kg_lost <= 0:
         return "Темп пока не считается: вес еще не снижался."
-
     kg_per_day = kg_lost / days
     target_date = date.today() + timedelta(days=round(left / kg_per_day))
-
-    return (
-        f"📌 Осталось: {left:.1f} кг\n"
-        f"⚡ Темп: {kg_per_day * 30:.1f} кг/месяц\n"
-        f"🎯 Прогноз цели: {target_date.strftime('%d.%m.%Y')}"
-    )
+    return f"📌 Осталось: {left:.1f} кг\n⚡ Темп: {kg_per_day * 30:.1f} кг/месяц\n🎯 Прогноз цели: {target_date.strftime('%d.%m.%Y')}"
 
 
 @dp.message(CommandStart())
 async def start(message: Message):
     user_id = message.from_user.id
     user = await get_user(user_id)
-
-    if user and user.get("is_registered"):
+    if user["is_registered"]:
         await message.answer("Главное меню:", reply_markup=main_keyboard)
         return
-
-    states[user_id] = {
-        "flow": "registration",
-        "step": "start_weight",
-        "data": {}
-    }
-
-    await message.answer(
-        "Привет! Настроим цель.\n\n1/5 Введи текущий вес, например: 101.3"
-    )
+    states[user_id] = {"flow": "registration", "step": "start_weight", "data": {}}
+    await message.answer("Привет! Настроим цель.\n\n1/5 Введи текущий вес, например: 101.3")
 
 
 @dp.message(Command("menu"))
@@ -257,18 +315,17 @@ async def menu(message: Message):
 async def dashboard(message: Message):
     user_id = message.from_user.id
     user = await get_user(user_id)
-
-    if not user.get("is_registered"):
+    if not user["is_registered"]:
         await message.answer("Сначала нажми /start и заполни данные.")
         return
-
-    _, workouts, calories, burned, counted = await today_stats(user_id)
+    _, workouts, calories, burned, counted, no_workout = await today_stats(user_id)
     total, lost, left, percent = calc_progress(user)
     score, label = calc_day_index(user, calories, burned)
     cal_text = "не считал" if not counted else f"{calories or 0} ккал"
-
+    age = age_from_birth(user["birth_date"])
     await message.answer(
         "📊 <b>Мини-дашборд</b>\n\n"
+        f"🎂 Возраст: {age if age else '—'}\n"
         f"⚖️ Вес: {user['current_weight']} кг\n"
         f"🎯 Цель: {user['target_weight']} кг\n"
         f"📈 Прогресс:\n{progress_bar(percent)}\n"
@@ -284,11 +341,9 @@ async def dashboard(message: Message):
 @dp.message(F.text == "📈 Прогноз цели")
 async def forecast(message: Message):
     user = await get_user(message.from_user.id)
-
-    if not user.get("is_registered"):
+    if not user["is_registered"]:
         await message.answer("Сначала нажми /start и заполни данные.")
         return
-
     await message.answer("📈 <b>Прогноз цели</b>\n\n" + await forecast_text(message.from_user.id, user))
 
 
@@ -302,6 +357,40 @@ async def daily_start(message: Message):
 async def add_weight(message: Message):
     states[message.from_user.id] = {"flow": "weight", "step": "weight", "data": {}}
     await message.answer("Введи текущий вес, например: 98.4")
+
+
+@dp.message(F.text == "📏 Замеры месяца")
+async def measurements_start(message: Message):
+    key = month_key()
+    existing = await fetchrow("SELECT id FROM body_measurements WHERE user_id=$1 AND measure_month=$2", message.from_user.id, key)
+    states[message.from_user.id] = {"flow": "measurements", "step": "chest_cm", "data": {"measure_month": key}}
+    prefix = "За этот месяц замеры уже есть. Новые значения заменят старые.\n\n" if existing else ""
+    await message.answer(prefix + "📏 Замеры месяца\n\n1/8 Грудь, см:")
+
+
+@dp.message(F.text == "📅 Отчет за месяц")
+async def month_report(message: Message):
+    await send_month_report(message)
+
+
+@dp.message(F.text == "🗂 История месяцев")
+async def month_history(message: Message):
+    rows = await fetch("SELECT report_month, report_text FROM monthly_reports WHERE user_id=$1 ORDER BY report_month DESC LIMIT 3", message.from_user.id)
+    if not rows:
+        await message.answer("Истории месяцев пока нет.")
+        return
+    for r in rows:
+        await message.answer(r["report_text"])
+
+
+@dp.message(F.text == "🗂 История недель")
+async def week_history(message: Message):
+    await save_current_week_summary(message.from_user.id)
+    rows = await fetch("SELECT summary_text FROM weekly_summaries WHERE user_id=$1 ORDER BY week_start DESC LIMIT 5", message.from_user.id)
+    if not rows:
+        await message.answer("Истории недель пока нет.")
+        return
+    await message.answer("🗂 <b>История недель</b>\n\n" + "\n\n".join(r["summary_text"] for r in rows))
 
 
 @dp.message(F.text == "⚙️ Настройки")
@@ -326,26 +415,18 @@ async def back(message: Message):
     await message.answer("Главное меню:", reply_markup=main_keyboard)
 
 
-@dp.message(F.text == "💾 Backup")
-async def backup(message: Message):
-    await message.answer("💾 Данные хранятся в PostgreSQL и не теряются после деплоя.")
-
-
 @dp.message()
 async def handler(message: Message):
     user_id = message.from_user.id
     text = (message.text or "").strip()
     state = states.get(user_id)
-
     if text.lower() == "отмена":
         states.pop(user_id, None)
         await message.answer("Отменил.", reply_markup=main_keyboard)
         return
-
     if not state:
         await message.answer("Выбери действие в меню:", reply_markup=main_keyboard)
         return
-
     try:
         flow = state["flow"]
         if flow == "registration":
@@ -356,6 +437,8 @@ async def handler(message: Message):
             await weight_flow(message, text)
         elif flow == "settings":
             await settings_flow(message, state, text)
+        elif flow == "measurements":
+            await measurements_flow(message, state, text)
     except ValueError:
         await message.answer("Введи число в правильном формате.")
 
@@ -364,7 +447,6 @@ async def registration_flow(message, state, text):
     user_id = message.from_user.id
     step = state["step"]
     data = state["data"]
-
     if step == "start_weight":
         data["start_weight"] = to_float(text)
         state["step"] = "target_weight"
@@ -375,33 +457,20 @@ async def registration_flow(message, state, text):
         await message.answer("3/5 Введи рост в см, например: 183")
     elif step == "height":
         data["height"] = to_float(text)
-        state["step"] = "age"
-        await message.answer("4/5 Введи возраст, например: 33")
-    elif step == "age":
-        data["age"] = to_int(text)
+        state["step"] = "birth_date"
+        await message.answer("4/5 Введи дату рождения в формате ДД.ММ.ГГГГ, например: 15.08.1992")
+    elif step == "birth_date":
+        data["birth_date"] = parse_birth_date(text)
         state["step"] = "calories"
         await message.answer("5/5 Введи дневной лимит калорий, например: 1600")
     elif step == "calories":
         data["calories"] = to_int(text)
-        await execute(
-            """
-            UPDATE users SET
-                start_weight=$1,
-                current_weight=$1,
-                target_weight=$2,
-                height_cm=$3,
-                age=$4,
-                daily_calorie_goal=$5,
-                is_registered=TRUE
+        await execute("""
+            UPDATE users SET start_weight=$1, current_weight=$1, target_weight=$2,
+            height_cm=$3, birth_date=$4, daily_calorie_goal=$5, is_registered=TRUE
             WHERE user_id=$6
-            """,
-            data["start_weight"], data["target_weight"], data["height"],
-            data["age"], data["calories"], user_id
-        )
-        await execute(
-            "INSERT INTO weight_logs(user_id, weight_date, weight) VALUES($1, CURRENT_DATE, $2)",
-            user_id, data["start_weight"]
-        )
+        """, data["start_weight"], data["target_weight"], data["height"], data["birth_date"], data["calories"], user_id)
+        await execute("INSERT INTO weight_logs(user_id, weight_date, weight) VALUES($1, CURRENT_DATE, $2)", user_id, data["start_weight"])
         states.pop(user_id, None)
         await message.answer("✅ Настройка завершена.", reply_markup=main_keyboard)
 
@@ -410,7 +479,6 @@ async def daily_flow(message, state, text):
     user_id = message.from_user.id
     step = state["step"]
     data = state["data"]
-
     if step == "calories":
         if text.lower() in ["не считал", "не считал калории", "не знаю"]:
             data["calories_in"] = None
@@ -449,23 +517,17 @@ async def daily_flow(message, state, text):
 
 async def save_daily(message, data):
     user_id = message.from_user.id
-    await execute(
-        """
+    await execute("""
         INSERT INTO daily_reports(user_id, report_date, calories_in, calories_counted, no_workout)
         VALUES($1, CURRENT_DATE, $2, $3, $4)
         ON CONFLICT(user_id, report_date) DO UPDATE SET
             calories_in=EXCLUDED.calories_in,
             calories_counted=EXCLUDED.calories_counted,
             no_workout=EXCLUDED.no_workout
-        """,
-        user_id, data.get("calories_in"), data.get("calories_counted", True), data.get("no_workout", False)
-    )
+    """, user_id, data.get("calories_in"), data.get("calories_counted", True), data.get("no_workout", False))
     await execute("DELETE FROM workouts WHERE user_id=$1 AND workout_date=CURRENT_DATE", user_id)
     for w in data.get("workouts", []):
-        await execute(
-            "INSERT INTO workouts(user_id, workout_date, workout_type, calories_burned) VALUES($1, CURRENT_DATE, $2, $3)",
-            user_id, w["type"], w["calories"]
-        )
+        await execute("INSERT INTO workouts(user_id, workout_date, workout_type, calories_burned) VALUES($1, CURRENT_DATE, $2, $3)", user_id, w["type"], w["calories"])
     states.pop(user_id, None)
     await message.answer("✅ Отчет за день сохранен.", reply_markup=main_keyboard)
     await dashboard(message)
@@ -483,23 +545,162 @@ async def weight_flow(message, text):
 
 async def settings_flow(message, state, text):
     user_id = message.from_user.id
-    step = state["step"]
-
-    if step == "target_weight":
+    if state["step"] == "target_weight":
         value = to_float(text)
         await execute("UPDATE users SET target_weight=$1 WHERE user_id=$2", value, user_id)
         await message.answer(f"✅ Цель обновлена: {value} кг", reply_markup=main_keyboard)
-    elif step == "calories":
+    elif state["step"] == "calories":
         value = to_int(text)
         await execute("UPDATE users SET daily_calorie_goal=$1 WHERE user_id=$2", value, user_id)
         await message.answer(f"✅ Лимит обновлен: {value} ккал", reply_markup=main_keyboard)
-
     states.pop(user_id, None)
+
+
+async def measurements_flow(message, state, text):
+    user_id = message.from_user.id
+    step = state["step"]
+    data = state["data"]
+    data[step] = to_float(text)
+    order = ["chest_cm", "biceps_cm", "forearm_cm", "belly_cm", "hips_cm", "thigh_cm", "calf_cm", "neck_cm"]
+    prompts = {
+        "biceps_cm": "2/8 Бицепс, см:",
+        "forearm_cm": "3/8 Предплечье, см:",
+        "belly_cm": "4/8 Живот, см:",
+        "hips_cm": "5/8 Таз, см:",
+        "thigh_cm": "6/8 Бедро, см:",
+        "calf_cm": "7/8 Икра, см:",
+        "neck_cm": "8/8 Шея, см:",
+    }
+    idx = order.index(step)
+    if idx < len(order) - 1:
+        next_step = order[idx + 1]
+        state["step"] = next_step
+        await message.answer(prompts[next_step])
+        return
+    await execute("""
+        INSERT INTO body_measurements(
+            user_id, measure_month, chest_cm, biceps_cm, forearm_cm, belly_cm,
+            hips_cm, thigh_cm, calf_cm, neck_cm
+        )
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+        ON CONFLICT(user_id, measure_month) DO UPDATE SET
+            chest_cm=EXCLUDED.chest_cm,
+            biceps_cm=EXCLUDED.biceps_cm,
+            forearm_cm=EXCLUDED.forearm_cm,
+            belly_cm=EXCLUDED.belly_cm,
+            hips_cm=EXCLUDED.hips_cm,
+            thigh_cm=EXCLUDED.thigh_cm,
+            calf_cm=EXCLUDED.calf_cm,
+            neck_cm=EXCLUDED.neck_cm,
+            measure_date=CURRENT_DATE
+    """, user_id, data["measure_month"], data.get("chest_cm"), data.get("biceps_cm"), data.get("forearm_cm"),
+        data.get("belly_cm"), data.get("hips_cm"), data.get("thigh_cm"), data.get("calf_cm"), data.get("neck_cm"))
+    states.pop(user_id, None)
+    await message.answer("✅ Замеры месяца сохранены.", reply_markup=main_keyboard)
+
+
+async def monthly_stats(user_id, key):
+    start, end = month_bounds(key)
+    reports = await fetch("SELECT * FROM daily_reports WHERE user_id=$1 AND report_date BETWEEN $2 AND $3", user_id, start, end)
+    workouts = await fetch("SELECT * FROM workouts WHERE user_id=$1 AND workout_date BETWEEN $2 AND $3", user_id, start, end)
+    weights = await fetch("SELECT * FROM weight_logs WHERE user_id=$1 AND weight_date BETWEEN $2 AND $3 ORDER BY weight_date", user_id, start, end)
+    meas = await fetchrow("SELECT * FROM body_measurements WHERE user_id=$1 AND measure_month=$2", user_id, key)
+    counted = [r for r in reports if r["calories_counted"]]
+    total_in = sum(r["calories_in"] or 0 for r in counted)
+    total_out = sum(w["calories_burned"] for w in workouts)
+    return {
+        "reports": reports, "workouts": workouts, "weights": weights, "meas": meas,
+        "total_in": total_in, "total_out": total_out,
+        "not_counted": sum(1 for r in reports if not r["calories_counted"]),
+        "no_workout": sum(1 for r in reports if r["no_workout"]),
+        "avg_in": round(total_in / len(counted)) if counted else 0
+    }
+
+
+def meas_line(label, key, cur, prev):
+    if not cur or cur[key] is None:
+        return f"{label}: нет данных"
+    if prev and prev[key] is not None:
+        diff = cur[key] - prev[key]
+        return f"{label}: {cur[key]:g} см ({diff:+.1f} см к прошлому мес.)"
+    return f"{label}: {cur[key]:g} см"
+
+
+async def send_month_report(message):
+    user_id = message.from_user.id
+    key = month_key()
+    prev_key = previous_month_key()
+    s = await monthly_stats(user_id, key)
+    p = await monthly_stats(user_id, prev_key)
+    w_text = "нет данных"
+    if s["weights"]:
+        w_start = s["weights"][0]["weight"]
+        w_end = s["weights"][-1]["weight"]
+        w_text = f"{w_start:g} → {w_end:g} кг ({w_end - w_start:+.1f} кг)"
+    lines = [
+        f"📅 <b>Отчет за месяц {key}</b>",
+        "",
+        f"🍽 Съедено: {s['total_in']} ккал",
+        f"🍽 Среднее по дням подсчета: {s['avg_in']} ккал/день",
+        f"❔ Дней без подсчета калорий: {s['not_counted']}",
+        "",
+        f"🔥 Сожжено: {s['total_out']} ккал",
+        f"🏋️ Тренировок: {len(s['workouts'])}",
+        f"🚫 Дней без тренировки: {s['no_workout']}",
+        "",
+        f"⚖️ Вес: {w_text}",
+        "",
+        "📏 <b>Замеры</b>",
+        meas_line("Грудь", "chest_cm", s["meas"], p["meas"]),
+        meas_line("Бицепс", "biceps_cm", s["meas"], p["meas"]),
+        meas_line("Предплечье", "forearm_cm", s["meas"], p["meas"]),
+        meas_line("Живот", "belly_cm", s["meas"], p["meas"]),
+        meas_line("Таз", "hips_cm", s["meas"], p["meas"]),
+        meas_line("Бедро", "thigh_cm", s["meas"], p["meas"]),
+        meas_line("Икра", "calf_cm", s["meas"], p["meas"]),
+        meas_line("Шея", "neck_cm", s["meas"], p["meas"]),
+    ]
+    text = "\n".join(lines)
+    await execute("""
+        INSERT INTO monthly_reports(user_id, report_month, report_text)
+        VALUES($1,$2,$3)
+        ON CONFLICT(user_id, report_month) DO UPDATE SET report_text=EXCLUDED.report_text, created_at=NOW()
+    """, user_id, key, text)
+    await message.answer(text)
+
+
+async def save_current_week_summary(user_id):
+    today = date.today()
+    start = today - timedelta(days=today.weekday())
+    end = start + timedelta(days=6)
+    reports = await fetch("SELECT * FROM daily_reports WHERE user_id=$1 AND report_date BETWEEN $2 AND $3", user_id, start, end)
+    workouts = await fetch("SELECT * FROM workouts WHERE user_id=$1 AND workout_date BETWEEN $2 AND $3", user_id, start, end)
+    counted = [r for r in reports if r["calories_counted"]]
+    total_in = sum(r["calories_in"] or 0 for r in counted)
+    total_out = sum(w["calories_burned"] for w in workouts)
+    not_counted = sum(1 for r in reports if not r["calories_counted"])
+    no_workout = sum(1 for r in reports if r["no_workout"])
+    text = (
+        f"📌 <b>Неделя {start.strftime('%d.%m')}—{end.strftime('%d.%m')}</b>\n"
+        f"🍽 Съедено: {total_in} ккал\n"
+        f"🔥 Сожжено: {total_out} ккал\n"
+        f"❔ Без подсчета: {not_counted} дней\n"
+        f"🚫 Без тренировки: {no_workout} дней"
+    )
+    await execute("""
+        INSERT INTO weekly_summaries(user_id, week_start, week_end, total_calories_in, total_calories_out, not_counted_days, no_workout_days, summary_text)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+        ON CONFLICT(user_id, week_start, week_end) DO UPDATE SET
+            total_calories_in=EXCLUDED.total_calories_in,
+            total_calories_out=EXCLUDED.total_calories_out,
+            not_counted_days=EXCLUDED.not_counted_days,
+            no_workout_days=EXCLUDED.no_workout_days,
+            summary_text=EXCLUDED.summary_text
+    """, user_id, start, end, total_in, total_out, not_counted, no_workout, text)
 
 
 async def main():
     global pool
-
     for i in range(10):
         try:
             pool = await asyncpg.create_pool(DATABASE_URL)
@@ -508,12 +709,10 @@ async def main():
         except Exception as e:
             print(f"DB retry {i + 1}/10:", e)
             await asyncio.sleep(5)
-
     if pool is None:
         raise RuntimeError("Не удалось подключиться к PostgreSQL")
-
     await create_tables()
-    print("Fitness bot PostgreSQL button fix started")
+    print("Fitness bot PostgreSQL full v2 started")
     await dp.start_polling(bot)
 
 
