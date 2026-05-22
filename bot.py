@@ -36,11 +36,38 @@ states = {}
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📝 Внести отчет за день")],
-        [KeyboardButton(text="📊 Мини-дашборд"), KeyboardButton(text="📈 Прогноз цели")],
-        [KeyboardButton(text="⚖️ Внести вес"), KeyboardButton(text="📏 Замеры месяца")],
-        [KeyboardButton(text="📅 Отчет за месяц"), KeyboardButton(text="🗂 История месяцев")],
-        [KeyboardButton(text="📌 Отчет за неделю"), KeyboardButton(text="🗂 История недель")],
-        [KeyboardButton(text="⚙️ Настройки")],
+
+        [
+            KeyboardButton(text="📊 Мини-дашборд"),
+            KeyboardButton(text="📈 Прогноз цели")
+        ],
+
+        [
+            KeyboardButton(text="⚖️ Внести вес"),
+            KeyboardButton(text="📏 Замеры месяца")
+        ],
+
+        [
+            KeyboardButton(text="📅 Отчет за месяц"),
+            KeyboardButton(text="🗂 История месяцев")
+        ],
+
+        [
+            KeyboardButton(text="🧠 AI-анализ недели"),
+            KeyboardButton(text="🗂 История недель")
+        ],
+
+        [
+            KeyboardButton(text="📌 Отчет за неделю")
+        ],
+
+        [
+            KeyboardButton(text="📉 Графики")
+        ],
+
+        [
+            KeyboardButton(text="⚙️ Настройки")
+        ],
     ],
     resize_keyboard=True
 )
