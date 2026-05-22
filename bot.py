@@ -68,6 +68,19 @@ measurement_select_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
+report_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🍽 Внести калории")],
+        [KeyboardButton(text="🏋️ Внести тренировку")],
+        [KeyboardButton(text="🚫 Не было тренировки")],
+        [KeyboardButton(text="❔ Не считал калории")],
+        [KeyboardButton(text="✅ Завершить день")],
+        [KeyboardButton(text="⬅️ Назад")]
+    ],
+    resize_keyboard=True
+)
+
+
 workout_count_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="0 тренировок")],
@@ -722,8 +735,84 @@ async def forecast(message: Message):
 
 @dp.message(F.text == "📝 Внести отчет за день")
 async def daily_start(message: Message):
-    states[message.from_user.id] = {"flow": "daily", "step": "calories", "data": {}}
-    await message.answer("Сколько калорий съел сегодня?\nВведи число или напиши: не считал")
+    await ensure_today_report(message.from_user.id)
+    await message.answer(
+        "📝 Отчет за день\n\nВыбери, что хочешь внести:",
+        reply_markup=report_keyboard
+    )
+
+async def ensure_today_report(user_id: int):
+    await execute(
+        """
+        INSERT INTO daily_reports(user_id, report_date, calories_in, calories_counted, no_workout)
+        VALUES($1, CURRENT_DATE, NULL, FALSE, FALSE)
+        ON CONFLICT(user_id, report_date) DO NOTHING
+        """,
+        user_id
+    )
+
+
+@dp.message(F.text == "🍽 Внести калории")
+async def calories_start(message: Message):
+    await ensure_today_report(message.from_user.id)
+    states[message.from_user.id] = {"flow": "report_menu", "step": "calories", "data": {}}
+    await message.answer("🍽 Сколько калорий съел сегодня? Введи число, например: 1650")
+
+
+@dp.message(F.text == "❔ Не считал калории")
+async def calories_not_counted(message: Message):
+    await ensure_today_report(message.from_user.id)
+    await execute(
+        """
+        UPDATE daily_reports
+        SET calories_in=NULL, calories_counted=FALSE
+        WHERE user_id=$1 AND report_date=CURRENT_DATE
+        """,
+        message.from_user.id
+    )
+    await message.answer("✅ Отметил: калории сегодня не считал.", reply_markup=report_keyboard)
+
+
+@dp.message(F.text == "🏋️ Внести тренировку")
+async def workout_menu_start(message: Message):
+    await ensure_today_report(message.from_user.id)
+    states[message.from_user.id] = {"flow": "report_menu", "step": "workout_type", "data": {}}
+    await message.answer("Выбери тип тренировки:", reply_markup=workout_type_keyboard)
+
+
+@dp.message(F.text == "🚫 Не было тренировки")
+async def no_workout_today(message: Message):
+    await ensure_today_report(message.from_user.id)
+    await execute("DELETE FROM workouts WHERE user_id=$1 AND workout_date=CURRENT_DATE", message.from_user.id)
+    await execute(
+        """
+        UPDATE daily_reports
+        SET no_workout=TRUE
+        WHERE user_id=$1 AND report_date=CURRENT_DATE
+        """,
+        message.from_user.id
+    )
+    await message.answer("✅ Отметил: тренировки сегодня не было.", reply_markup=report_keyboard)
+
+
+@dp.message(F.text == "✅ Завершить день")
+async def finish_day(message: Message):
+    await ensure_today_report(message.from_user.id)
+
+    user_id = message.from_user.id
+    user = await get_user(user_id)
+    report, workouts, calories, burned, counted, no_workout = await today_stats(user_id)
+
+    await message.answer("✅ День сохранен.", reply_markup=main_keyboard)
+    await dashboard(message)
+
+    await message.answer(ai_day_text(
+        user,
+        calories,
+        burned,
+        len(workouts),
+        counted=counted
+    ))
 
 
 @dp.message(F.text == "⚖️ Внести вес")
@@ -1045,6 +1134,8 @@ async def handler(message: Message):
             await registration_flow(message, state, text)
         elif flow == "daily":
             await daily_flow(message, state, text)
+        elif flow == "report_menu":
+            await report_menu_flow(message, state, text)
         elif flow == "weight":
             await weight_flow(message, text)
         elif flow == "settings":
@@ -1089,6 +1180,61 @@ async def registration_flow(message, state, text):
         await execute("INSERT INTO weight_logs(user_id, weight_date, weight) VALUES($1, CURRENT_DATE, $2)", user_id, data["start_weight"])
         states.pop(user_id, None)
         await message.answer("✅ Настройка завершена.", reply_markup=main_keyboard)
+
+
+async def report_menu_flow(message, state, text):
+    user_id = message.from_user.id
+    step = state["step"]
+    data = state["data"]
+
+    if step == "calories":
+        calories = to_int(text)
+        await ensure_today_report(user_id)
+        await execute(
+            """
+            UPDATE daily_reports
+            SET calories_in=$1, calories_counted=TRUE
+            WHERE user_id=$2 AND report_date=CURRENT_DATE
+            """,
+            calories,
+            user_id
+        )
+        states.pop(user_id, None)
+        await message.answer(f"✅ Калории сохранены: {calories} ккал", reply_markup=report_keyboard)
+        return
+
+    if step == "workout_type":
+        data["workout_type"] = text
+        state["step"] = "workout_calories"
+        await message.answer(f"Сколько калорий сжег на «{text}»?")
+        return
+
+    if step == "workout_calories":
+        calories_burned = to_int(text)
+        await ensure_today_report(user_id)
+        await execute(
+            """
+            INSERT INTO workouts(user_id, workout_date, workout_type, calories_burned)
+            VALUES($1, CURRENT_DATE, $2, $3)
+            """,
+            user_id,
+            data["workout_type"],
+            calories_burned
+        )
+        await execute(
+            """
+            UPDATE daily_reports
+            SET no_workout=FALSE
+            WHERE user_id=$1 AND report_date=CURRENT_DATE
+            """,
+            user_id
+        )
+        states.pop(user_id, None)
+        await message.answer(
+            f"✅ Тренировка сохранена: {data['workout_type']} / {calories_burned} ккал",
+            reply_markup=report_keyboard
+        )
+        return
 
 
 async def daily_flow(message, state, text):
