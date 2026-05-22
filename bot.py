@@ -44,7 +44,7 @@ main_keyboard = ReplyKeyboardMarkup(
 
         [
             KeyboardButton(text="⚖️ Внести вес"),
-            KeyboardButton(text="📏 Замеры месяца")
+            KeyboardButton(text="📏 Замеры")
         ],
 
         [
@@ -68,6 +68,16 @@ main_keyboard = ReplyKeyboardMarkup(
         [
             KeyboardButton(text="⚙️ Настройки")
         ],
+    ],
+    resize_keyboard=True
+)
+
+measurements_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="📥 Внести замеры")],
+        [KeyboardButton(text="📊 График замеров")],
+        [KeyboardButton(text="🗂 История замеров")],
+        [KeyboardButton(text="⬅️ Назад")]
     ],
     resize_keyboard=True
 )
@@ -736,14 +746,19 @@ async def add_weight(message: Message):
     await message.answer("Введи текущий вес, например: 98.4")
 
 
-@dp.message(F.text == "📏 Замеры месяца")
-async def measurements_start(message: Message):
-    key = month_key()
-    existing = await fetchrow("SELECT id FROM body_measurements WHERE user_id=$1 AND measure_month=$2", message.from_user.id, key)
-    states[message.from_user.id] = {"flow": "measurements", "step": "chest_cm", "data": {"measure_month": key}}
-    prefix = "За этот месяц замеры уже есть. Новые значения заменят старые.\n\n" if existing else ""
-    await message.answer(prefix + "📏 Замеры месяца\n\n1/8 Грудь, см:")
+@dp.message(F.text == "📏 Замеры")
+async def measurements_menu(message: Message):
+    await message.answer(
+        "📏 Меню замеров",
+        reply_markup=measurements_keyboard
+    )
+@dp.message(F.text == "📥 Внести замеры")
+async def start_measurements(message: Message, state: FSMContext):
+    await state.set_state(MeasurementStates.chest)
 
+    await message.answer(
+        "📏 Замеры месяца\n\n1/8 Грудь, см:"
+    )
 
 @dp.message(F.text == "📅 Отчет за месяц")
 async def month_report(message: Message):
@@ -901,9 +916,36 @@ async def graph_activity(message: Message):
         values,
         "ккал"
     )
+@dp.message(F.text == "🗂 История замеров")
+async def measurements_history(message: Message):
+    rows = await fetch(
+        """
+        SELECT measure_date, belly_cm, chest_cm
+        FROM body_measurements
+        WHERE user_id=$1
+        ORDER BY measure_date DESC
+        LIMIT 6
+        """,
+        message.from_user.id
+    )
+
+    if not rows:
+        await message.answer("История замеров пока пустая.")
+        return
+
+    text = "🗂 История замеров\n\n"
+
+    for row in rows:
+        text += (
+            f"📅 {row['measure_date'].strftime('%d.%m.%Y')}\n"
+            f"📏 Живот: {row['belly_cm']} см\n"
+            f"💪 Грудь: {row['chest_cm']} см\n\n"
+        )
+
+    await message.answer(text)    
 
 
-@dp.message(F.text == "📏 Замеры")
+@dp.message(F.text == "📊 График замеров")
 async def graph_measurements(message: Message):
     rows = await fetch(
         """
