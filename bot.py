@@ -3,6 +3,7 @@ import os
 import asyncio
 import random
 import matplotlib.pyplot as plt
+import numpy as np
 from io import BytesIO
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -928,6 +929,121 @@ async def send_plot(message, title, labels, values, ylabel):
     )
 
 
+
+async def send_plot_image(message, fig, title):
+    buf = BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    buf.seek(0)
+
+    photo = BufferedInputFile(
+        buf.getvalue(),
+        filename="graph.png"
+    )
+
+    await message.answer_photo(
+        photo=photo,
+        caption=title
+    )
+
+
+def calc_linear_trend(values):
+    if len(values) < 2:
+        return None
+
+    x = np.arange(len(values))
+    y = np.array(values, dtype=float)
+    coeffs = np.polyfit(x, y, 1)
+    trend = coeffs[0] * x + coeffs[1]
+    return trend.tolist(), float(coeffs[0])
+
+
+def weight_graph_ai(values, goal_weight=None):
+    if len(values) < 2:
+        return "🧠 <b>AI-анализ веса</b>\n\nПока мало данных. Внеси вес хотя бы 2 раза."
+
+    delta = values[-1] - values[0]
+    max_jump = max(abs(values[i] - values[i - 1]) for i in range(1, len(values))) if len(values) > 1 else 0
+
+    if delta < -0.5:
+        trend_text = "🟢 Вес снижается. Тренд идет в правильную сторону."
+    elif delta > 0.5:
+        trend_text = "🔴 Вес растет. Нужно посмотреть питание, активность и задержку воды."
+    else:
+        trend_text = "🟡 Вес почти стоит. Это может быть плато или просто мало данных."
+
+    if max_jump >= 1.5:
+        stability = "Вес скачет заметно. Такое часто бывает из-за воды, соли, углеводов и поздних приемов пищи."
+    else:
+        stability = "Колебания веса выглядят умеренными."
+
+    goal_text = ""
+    if goal_weight:
+        left = values[-1] - goal_weight
+        if left > 0:
+            goal_text = f"\nДо цели осталось примерно {left:.1f} кг."
+        else:
+            goal_text = "\nЦель по весу уже достигнута или пройдена."
+
+    return (
+        "🧠 <b>AI-анализ веса</b>\n\n"
+        f"{trend_text}\n"
+        f"{stability}"
+        f"{goal_text}"
+    )
+
+
+def calories_graph_ai(values, goal):
+    if not values:
+        return "🧠 <b>AI-анализ калорий</b>\n\nПока нет данных по калориям."
+
+    avg = round(sum(values) / len(values))
+    over_days = sum(1 for v in values if v > goal)
+    good_days = len(values) - over_days
+
+    if over_days == 0:
+        verdict = "🟢 Отлично: все дни в рамках лимита."
+    elif over_days <= 2:
+        verdict = "🟡 В целом нормально: есть несколько дней с перебором."
+    else:
+        verdict = "🔴 Переборов многовато. Именно они могут тормозить прогресс."
+
+    return (
+        "🧠 <b>AI-анализ калорий</b>\n\n"
+        f"{verdict}\n"
+        f"Среднее за период: {avg} ккал.\n"
+        f"Дней в лимите: {good_days}, дней с перебором: {over_days}."
+    )
+
+
+def measurements_graph_ai(rows):
+    if len(rows) < 2:
+        return "🧠 <b>AI-анализ замеров</b>\n\nПока мало данных. Нужны замеры минимум за 2 месяца."
+
+    first = rows[0]
+    last = rows[-1]
+
+    notes = []
+    for label, key in [
+        ("живот", "belly_cm"),
+        ("грудь", "chest_cm"),
+        ("таз", "hips_cm"),
+        ("бедро", "thigh_cm"),
+    ]:
+        if first[key] is not None and last[key] is not None:
+            diff = float(last[key]) - float(first[key])
+            notes.append(f"{label}: {diff:+.1f} см")
+
+    if not notes:
+        return "🧠 <b>AI-анализ замеров</b>\n\nДанных по ключевым замерам пока недостаточно."
+
+    return (
+        "🧠 <b>AI-анализ замеров</b>\n\n"
+        "Изменения за период:\n" +
+        "\n".join(f"— {n}" for n in notes)
+    )
+
+
 @dp.message(F.text == "📉 Графики")
 async def graphs_menu(message: Message):
     await message.answer("Выбери график:", reply_markup=graphs_keyboard)
@@ -935,6 +1051,7 @@ async def graphs_menu(message: Message):
 
 @dp.message(F.text == "⚖️ Вес")
 async def graph_weight(message: Message):
+    user = await get_user(message.from_user.id)
     rows = await fetch(
         "SELECT weight_date, weight FROM weight_logs WHERE user_id=$1 ORDER BY weight_date DESC LIMIT 30",
         message.from_user.id
@@ -942,20 +1059,55 @@ async def graph_weight(message: Message):
 
     rows = list(reversed(rows))
 
+    if not rows:
+        await message.answer("Недостаточно данных для графика веса.")
+        return
+
     labels = [r["weight_date"].strftime("%d.%m") for r in rows]
     values = [float(r["weight"]) for r in rows]
 
-    await send_plot(
-        message,
-        "⚖️ График веса",
-        labels,
-        values,
-        "кг"
-    )
+    fig = plt.figure(figsize=(9, 4.8))
+    ax = fig.add_subplot(111)
+
+    ax.plot(labels, values, marker="o", label="Вес")
+
+    trend_data = calc_linear_trend(values)
+    if trend_data:
+        trend, slope = trend_data
+        ax.plot(labels, trend, linestyle="--", label="Тренд")
+
+    target = user["target_weight"] if user and user["target_weight"] else None
+    if target:
+        ax.axhline(float(target), linestyle=":", label=f"Цель {target:g} кг")
+
+    start_weight = values[0]
+    current_weight = values[-1]
+    left = current_weight - float(target) if target else None
+
+    title = "⚖️ Вес: "
+    title += f"{start_weight:g} → {current_weight:g} кг"
+    if left is not None:
+        title += f" | осталось {left:.1f} кг" if left > 0 else " | цель достигнута"
+
+    if trend_data:
+        forecast_30 = current_weight + slope * 30
+        title += f" | прогноз 30д: {forecast_30:.1f} кг"
+
+    ax.set_title(title)
+    ax.set_ylabel("кг")
+    ax.legend()
+    ax.tick_params(axis="x", rotation=45)
+    fig.tight_layout()
+
+    await send_plot_image(message, fig, "⚖️ График веса v2")
+    await message.answer(weight_graph_ai(values, target))
 
 
 @dp.message(F.text == "🍽 Калории")
 async def graph_calories(message: Message):
+    user = await get_user(message.from_user.id)
+    goal = user["daily_calorie_goal"] or 1600
+
     rows = await fetch(
         """
         SELECT report_date, calories_in
@@ -970,16 +1122,34 @@ async def graph_calories(message: Message):
 
     rows = list(reversed(rows))
 
+    if not rows:
+        await message.answer("Недостаточно данных для графика калорий.")
+        return
+
     labels = [r["report_date"].strftime("%d.%m") for r in rows]
     values = [int(r["calories_in"] or 0) for r in rows]
+    avg = round(sum(values) / len(values))
 
-    await send_plot(
-        message,
-        "🍽 График калорий",
-        labels,
-        values,
-        "ккал"
-    )
+    fig = plt.figure(figsize=(9, 4.8))
+    ax = fig.add_subplot(111)
+
+    ax.plot(labels, values, marker="o", label="Калории")
+    ax.axhline(goal, linestyle="--", label=f"Лимит {goal} ккал")
+    ax.axhline(avg, linestyle=":", label=f"Среднее {avg} ккал")
+
+    over_x = [labels[i] for i, v in enumerate(values) if v > goal]
+    over_y = [v for v in values if v > goal]
+    if over_x:
+        ax.scatter(over_x, over_y, marker="x", s=70, label="Перебор")
+
+    ax.set_title("🍽 Калории за период")
+    ax.set_ylabel("ккал")
+    ax.legend()
+    ax.tick_params(axis="x", rotation=45)
+    fig.tight_layout()
+
+    await send_plot_image(message, fig, "🍽 График калорий v2")
+    await message.answer(calories_graph_ai(values, goal))
 
 
 @dp.message(F.text == "🔥 Активность")
@@ -998,26 +1168,44 @@ async def graph_activity(message: Message):
 
     rows = list(reversed(rows))
 
+    if not rows:
+        await message.answer("Недостаточно данных для графика активности.")
+        return
+
     labels = [r["workout_date"].strftime("%d.%m") for r in rows]
     values = [int(r["total"] or 0) for r in rows]
+    avg = round(sum(values) / len(values))
 
-    await send_plot(
-        message,
-        "🔥 График активности",
-        labels,
-        values,
-        "ккал"
-    )
+    fig = plt.figure(figsize=(9, 4.8))
+    ax = fig.add_subplot(111)
+
+    ax.bar(labels, values, label="Сожжено")
+    ax.axhline(avg, linestyle="--", label=f"Среднее {avg} ккал")
+
+    ax.set_title("🔥 Активность за период")
+    ax.set_ylabel("ккал")
+    ax.legend()
+    ax.tick_params(axis="x", rotation=45)
+    fig.tight_layout()
+
+    await send_plot_image(message, fig, "🔥 График активности v2")
+
+    if avg >= 600:
+        text = "🧠 <b>AI-анализ активности</b>\n\n🟢 Средняя активность высокая. Это хорошо помогает дефициту."
+    elif avg >= 350:
+        text = "🧠 <b>AI-анализ активности</b>\n\n🟡 Активность нормальная, но можно добавить 1–2 более сильных дня."
+    else:
+        text = "🧠 <b>AI-анализ активности</b>\n\n🔴 Активность низкая. Для прогресса стоит добавить движение."
+    await message.answer(text)
 
 
-@dp.message(F.text == "📊 График замеров")
+@dp.message(F.text == "📏 Замеры")
 async def graph_measurements(message: Message):
     rows = await fetch(
         """
-        SELECT measure_date, belly_cm
+        SELECT measure_date, belly_cm, chest_cm, hips_cm, thigh_cm
         FROM body_measurements
         WHERE user_id=$1
-        AND belly_cm IS NOT NULL
         ORDER BY measure_date DESC
         LIMIT 12
         """,
@@ -1026,60 +1214,48 @@ async def graph_measurements(message: Message):
 
     rows = list(reversed(rows))
 
-    labels = [r["measure_date"].strftime("%m.%y") for r in rows]
-    values = [float(r["belly_cm"]) for r in rows]
+    if not rows:
+        await message.answer("Недостаточно данных для графика замеров.")
+        return
 
-    await send_plot(
-        message,
-        "📏 Изменение живота",
-        labels,
-        values,
-        "см"
-    )
+    labels = [r["measure_date"].strftime("%m.%y") for r in rows]
+
+    fig = plt.figure(figsize=(9, 4.8))
+    ax = fig.add_subplot(111)
+
+    series = [
+        ("Живот", "belly_cm"),
+        ("Грудь", "chest_cm"),
+        ("Таз", "hips_cm"),
+        ("Бедро", "thigh_cm"),
+    ]
+
+    plotted = False
+    for label, key in series:
+        values = [float(r[key]) if r[key] is not None else None for r in rows]
+        if any(v is not None for v in values):
+            ax.plot(labels, values, marker="o", label=label)
+            plotted = True
+
+    if not plotted:
+        await message.answer("Нет данных по ключевым замерам.")
+        plt.close(fig)
+        return
+
+    ax.set_title("📏 Замеры по месяцам")
+    ax.set_ylabel("см")
+    ax.legend()
+    ax.tick_params(axis="x", rotation=45)
+    fig.tight_layout()
+
+    await send_plot_image(message, fig, "📏 График замеров v2")
+    await message.answer(measurements_graph_ai(rows))
 
 
 @dp.message(F.text == "⬅️ Назад")
 async def back_main(message: Message):
     await message.answer("Главное меню", reply_markup=main_keyboard)
 
-
-@dp.message(F.text == "🗂 История замеров")
-async def measurements_history(message: Message):
-    rows = await fetch(
-        """
-        SELECT measure_month, measure_date, chest_cm, biceps_cm, forearm_cm,
-               belly_cm, hips_cm, thigh_cm, calf_cm, neck_cm
-        FROM body_measurements
-        WHERE user_id=$1
-        ORDER BY measure_month DESC
-        LIMIT 6
-        """,
-        message.from_user.id
-    )
-
-    if not rows:
-        await message.answer("История замеров пока пустая.")
-        return
-
-    text = "🗂 <b>История замеров</b>\n\n"
-
-    for row in rows:
-        text += f"📅 <b>{row['measure_month']}</b>\n"
-        values = [
-            ("Грудь", row["chest_cm"]),
-            ("Бицепс", row["biceps_cm"]),
-            ("Предплечье", row["forearm_cm"]),
-            ("Живот", row["belly_cm"]),
-            ("Таз", row["hips_cm"]),
-            ("Бедро", row["thigh_cm"]),
-            ("Икра", row["calf_cm"]),
-            ("Шея", row["neck_cm"]),
-        ]
-        filled = [f"{name}: {value:g} см" for name, value in values if value is not None]
-        text += "\n".join(filled) if filled else "нет данных"
-        text += "\n\n"
-
-    await message.answer(text)
 
 @dp.message(F.text == "⚙️ Настройки")
 async def settings(message: Message):
@@ -1650,7 +1826,7 @@ async def main():
     scheduler.add_job(auto_finish_day_job, "cron", hour=0, minute=0)
     scheduler.start()
 
-    print("Fitness bot PostgreSQL safe v3.0 auto finish started")
+    print("Fitness bot PostgreSQL safe v3.1 graphs v2 started")
     await dp.start_polling(bot)
 
 
