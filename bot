@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
-from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, BufferedInputFile
 from aiogram.client.default import DefaultBotProperties
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
@@ -812,13 +812,13 @@ async def send_plot(message, title, labels, values, ylabel):
 
     buf.seek(0)
     photo = BufferedInputFile(
-    buf.getvalue(),
-    filename="graph.png"
+        buf.getvalue(),
+        filename="graph.png"
 )
 
-await message.answer_photo(
-    photo=photo,
-    caption=title
+    await message.answer_photo(
+        photo=photo,
+        caption=title
 )
 
 @dp.message(F.text == "📉 Графики")
