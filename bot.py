@@ -36,38 +36,13 @@ states = {}
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="📝 Внести отчет за день")],
-
-        [
-            KeyboardButton(text="📊 Мини-дашборд"),
-            KeyboardButton(text="📈 Прогноз цели")
-        ],
-
-        [
-            KeyboardButton(text="⚖️ Внести вес"),
-            KeyboardButton(text="📏 Замеры")
-        ],
-
-        [
-            KeyboardButton(text="📅 Отчет за месяц"),
-            KeyboardButton(text="🗂 История месяцев")
-        ],
-
-        [
-            KeyboardButton(text="🧠 AI-анализ недели"),
-            KeyboardButton(text="🗂 История недель")
-        ],
-
-        [
-            KeyboardButton(text="📌 Отчет за неделю")
-        ],
-
-        [
-            KeyboardButton(text="📉 Графики")
-        ],
-
-        [
-            KeyboardButton(text="⚙️ Настройки")
-        ],
+        [KeyboardButton(text="📊 Мини-дашборд"), KeyboardButton(text="📈 Прогноз цели")],
+        [KeyboardButton(text="⚖️ Внести вес"), KeyboardButton(text="📏 Замеры")],
+        [KeyboardButton(text="📅 Отчет за месяц"), KeyboardButton(text="🗂 История месяцев")],
+        [KeyboardButton(text="🧠 AI-анализ недели"), KeyboardButton(text="🗂 История недель")],
+        [KeyboardButton(text="📌 Отчет за неделю")],
+        [KeyboardButton(text="📉 Графики")],
+        [KeyboardButton(text="⚙️ Настройки")],
     ],
     resize_keyboard=True
 )
@@ -77,7 +52,7 @@ measurements_keyboard = ReplyKeyboardMarkup(
         [KeyboardButton(text="📥 Внести замеры")],
         [KeyboardButton(text="📊 График замеров")],
         [KeyboardButton(text="🗂 История замеров")],
-        [KeyboardButton(text="⬅️ Назад")]
+        [KeyboardButton(text="⬅️ Назад")],
     ],
     resize_keyboard=True
 )
@@ -752,13 +727,15 @@ async def measurements_menu(message: Message):
         "📏 Меню замеров",
         reply_markup=measurements_keyboard
     )
-@dp.message(F.text == "📥 Внести замеры")
-async def start_measurements(message: Message, state: FSMContext):
-    await state.set_state(MeasurementStates.chest)
 
-    await message.answer(
-        "📏 Замеры месяца\n\n1/8 Грудь, см:"
-    )
+
+@dp.message(F.text == "📥 Внести замеры")
+async def measurements_start(message: Message):
+    key = month_key()
+    existing = await fetchrow("SELECT id FROM body_measurements WHERE user_id=$1 AND measure_month=$2", message.from_user.id, key)
+    states[message.from_user.id] = {"flow": "measurements", "step": "chest_cm", "data": {"measure_month": key}}
+    prefix = "За этот месяц замеры уже есть. Новые значения заменят старые.\n\n" if existing else ""
+    await message.answer(prefix + "📏 Замеры месяца\n\n1/8 Грудь, см:")
 
 @dp.message(F.text == "📅 Отчет за месяц")
 async def month_report(message: Message):
@@ -826,15 +803,17 @@ async def send_plot(message, title, labels, values, ylabel):
     plt.close()
 
     buf.seek(0)
+
     photo = BufferedInputFile(
         buf.getvalue(),
         filename="graph.png"
-)
+    )
 
     await message.answer_photo(
         photo=photo,
         caption=title
-)
+    )
+
 
 @dp.message(F.text == "📉 Графики")
 async def graphs_menu(message: Message):
@@ -916,33 +895,6 @@ async def graph_activity(message: Message):
         values,
         "ккал"
     )
-@dp.message(F.text == "🗂 История замеров")
-async def measurements_history(message: Message):
-    rows = await fetch(
-        """
-        SELECT measure_date, belly_cm, chest_cm
-        FROM body_measurements
-        WHERE user_id=$1
-        ORDER BY measure_date DESC
-        LIMIT 6
-        """,
-        message.from_user.id
-    )
-
-    if not rows:
-        await message.answer("История замеров пока пустая.")
-        return
-
-    text = "🗂 История замеров\n\n"
-
-    for row in rows:
-        text += (
-            f"📅 {row['measure_date'].strftime('%d.%m.%Y')}\n"
-            f"📏 Живот: {row['belly_cm']} см\n"
-            f"💪 Грудь: {row['chest_cm']} см\n\n"
-        )
-
-    await message.answer(text)    
 
 
 @dp.message(F.text == "📊 График замеров")
@@ -976,6 +928,41 @@ async def graph_measurements(message: Message):
 @dp.message(F.text == "⬅️ Назад")
 async def back_main(message: Message):
     await message.answer("Главное меню", reply_markup=main_keyboard)
+
+
+@dp.message(F.text == "🗂 История замеров")
+async def measurements_history(message: Message):
+    rows = await fetch(
+        """
+        SELECT measure_date, chest_cm, biceps_cm, forearm_cm, belly_cm, hips_cm, thigh_cm, calf_cm, neck_cm
+        FROM body_measurements
+        WHERE user_id=$1
+        ORDER BY measure_date DESC
+        LIMIT 6
+        """,
+        message.from_user.id
+    )
+
+    if not rows:
+        await message.answer("История замеров пока пустая.")
+        return
+
+    text = "🗂 <b>История замеров</b>\n\n"
+
+    for row in rows:
+        text += (
+            f"📅 {row['measure_date'].strftime('%d.%m.%Y')}\n"
+            f"Грудь: {row['chest_cm'] or '—'} см\n"
+            f"Бицепс: {row['biceps_cm'] or '—'} см\n"
+            f"Предплечье: {row['forearm_cm'] or '—'} см\n"
+            f"Живот: {row['belly_cm'] or '—'} см\n"
+            f"Таз: {row['hips_cm'] or '—'} см\n"
+            f"Бедро: {row['thigh_cm'] or '—'} см\n"
+            f"Икра: {row['calf_cm'] or '—'} см\n"
+            f"Шея: {row['neck_cm'] or '—'} см\n\n"
+        )
+
+    await message.answer(text)
 
 
 @dp.message(F.text == "⚙️ Настройки")
@@ -1373,7 +1360,7 @@ async def main():
     scheduler.add_job(monthly_reminder_job, "cron", day=1, hour=9, minute=0)
     scheduler.start()
 
-    print("Fitness bot PostgreSQL safe v2.2 started")
+    print("Fitness bot PostgreSQL safe v2.7 measurements menu started")
     await dp.start_polling(bot)
 
 

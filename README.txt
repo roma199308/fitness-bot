@@ -1,10 +1,11 @@
-Fitness Bot PostgreSQL Safe v2.6 Graphs
+Fitness Bot PostgreSQL Safe v2.7 Measurements Menu
 
-Добавлено:
-- 📉 Графики
-- ⚖️ Вес
-- 🍽 Калории
-- 🔥 Активность
-- 📏 Замеры
+Исправлено:
+- архив содержит bot.py и requirements.txt
+- меню 📏 Замеры
+- 📥 Внести замеры запускает ввод
+- 📊 График замеров отправляет PNG
+- 🗂 История замеров
+- fix BufferedInputFile для графиков
 
-Без сброса базы.
+Без сброса базы. Текущие данные сохраняются.
