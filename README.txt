@@ -1,1 +1,18 @@
-v2.8 measurement field buttons; removed waist/talia; safe update, no DB reset
+Fitness Bot PostgreSQL Safe v2.9 Report Menu
+
+Добавлено:
+- меню дневного отчета
+- 🍽 Внести калории
+- 🏋️ Внести тренировку
+- 🚫 Не было тренировки
+- ❔ Не считал калории
+- ✅ Завершить день
+
+Важно:
+- база не сбрасывается
+- данные сохраняются
+- синтаксис проверен перед выдачей
+
+Заменить:
+- bot.py
+- requirements.txt
