@@ -811,11 +811,15 @@ async def send_plot(message, title, labels, values, ylabel):
     plt.close()
 
     buf.seek(0)
-    await message.answer_photo(
-        photo=buf,
-        caption=title
-    )
+    photo = BufferedInputFile(
+    buf.getvalue(),
+    filename="graph.png"
+)
 
+await message.answer_photo(
+    photo=photo,
+    caption=title
+)
 
 @dp.message(F.text == "📉 Графики")
 async def graphs_menu(message: Message):
