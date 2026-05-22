@@ -189,6 +189,7 @@ async def create_tables():
         calories_in INT,
         calories_counted BOOLEAN DEFAULT TRUE,
         no_workout BOOLEAN DEFAULT FALSE,
+        day_finished BOOLEAN DEFAULT FALSE,
         created_at TIMESTAMP DEFAULT NOW(),
         UNIQUE(user_id, report_date)
     )
@@ -264,6 +265,7 @@ async def create_tables():
     await execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS birth_date DATE")
     await execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS daily_calorie_goal INT DEFAULT 1600")
     await execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_registered BOOLEAN DEFAULT FALSE")
+    await execute("ALTER TABLE daily_reports ADD COLUMN IF NOT EXISTS day_finished BOOLEAN DEFAULT FALSE")
 
     await execute("ALTER TABLE daily_reports ADD COLUMN IF NOT EXISTS calories_in INT")
     await execute("ALTER TABLE daily_reports ADD COLUMN IF NOT EXISTS calories_counted BOOLEAN DEFAULT TRUE")
@@ -744,8 +746,8 @@ async def daily_start(message: Message):
 async def ensure_today_report(user_id: int):
     await execute(
         """
-        INSERT INTO daily_reports(user_id, report_date, calories_in, calories_counted, no_workout)
-        VALUES($1, CURRENT_DATE, NULL, FALSE, FALSE)
+        INSERT INTO daily_reports(user_id, report_date, calories_in, calories_counted, no_workout, day_finished)
+        VALUES($1, CURRENT_DATE, NULL, FALSE, FALSE, FALSE)
         ON CONFLICT(user_id, report_date) DO NOTHING
         """,
         user_id
@@ -765,7 +767,7 @@ async def calories_not_counted(message: Message):
     await execute(
         """
         UPDATE daily_reports
-        SET calories_in=NULL, calories_counted=FALSE
+        SET calories_in=NULL, calories_counted=FALSE, day_finished=FALSE
         WHERE user_id=$1 AND report_date=CURRENT_DATE
         """,
         message.from_user.id
@@ -787,7 +789,7 @@ async def no_workout_today(message: Message):
     await execute(
         """
         UPDATE daily_reports
-        SET no_workout=TRUE
+        SET no_workout=TRUE, day_finished=FALSE
         WHERE user_id=$1 AND report_date=CURRENT_DATE
         """,
         message.from_user.id
@@ -797,22 +799,7 @@ async def no_workout_today(message: Message):
 
 @dp.message(F.text == "✅ Завершить день")
 async def finish_day(message: Message):
-    await ensure_today_report(message.from_user.id)
-
-    user_id = message.from_user.id
-    user = await get_user(user_id)
-    report, workouts, calories, burned, counted, no_workout = await today_stats(user_id)
-
-    await message.answer("✅ День сохранен.", reply_markup=main_keyboard)
-    await dashboard(message)
-
-    await message.answer(ai_day_text(
-        user,
-        calories,
-        burned,
-        len(workouts),
-        counted=counted
-    ))
+    await finish_day_for_user(message.from_user.id, message=message)
 
 
 @dp.message(F.text == "⚖️ Внести вес")
@@ -1193,7 +1180,7 @@ async def report_menu_flow(message, state, text):
         await execute(
             """
             UPDATE daily_reports
-            SET calories_in=$1, calories_counted=TRUE
+            SET calories_in=$1, calories_counted=TRUE, day_finished=FALSE
             WHERE user_id=$2 AND report_date=CURRENT_DATE
             """,
             calories,
@@ -1224,7 +1211,7 @@ async def report_menu_flow(message, state, text):
         await execute(
             """
             UPDATE daily_reports
-            SET no_workout=FALSE
+            SET no_workout=FALSE, day_finished=FALSE
             WHERE user_id=$1 AND report_date=CURRENT_DATE
             """,
             user_id
@@ -1569,6 +1556,77 @@ async def reset_flow(message: Message, text: str):
         "Нажми /start, чтобы настроить бота заново."
     )
 
+async def finish_day_for_user(user_id: int, message: Message | None = None):
+    await ensure_today_report(user_id)
+
+    user = await get_user(user_id)
+    report, workouts, calories, burned, counted, no_workout = await today_stats(user_id)
+
+    await execute(
+        """
+        UPDATE daily_reports
+        SET day_finished=TRUE
+        WHERE user_id=$1 AND report_date=CURRENT_DATE
+        """,
+        user_id
+    )
+
+    if message:
+        await message.answer("✅ День сохранен.", reply_markup=main_keyboard)
+        await dashboard(message)
+        await message.answer(ai_day_text(
+            user,
+            calories,
+            burned,
+            len(workouts),
+            counted=counted
+        ))
+    else:
+        await bot.send_message(user_id, "✅ День автоматически завершен.")
+        await bot.send_message(
+            user_id,
+            (
+                f"🍽 Калории: {'не считал' if not counted else str(calories or 0) + ' ккал'}\n"
+                f"🔥 Сожжено: {burned} ккал\n"
+                f"🏋️ Тренировок: {len(workouts)}"
+            )
+        )
+        await bot.send_message(user_id, ai_day_text(
+            user,
+            calories,
+            burned,
+            len(workouts),
+            counted=counted
+        ))
+
+
+async def auto_finish_day_job():
+    users = await fetch("SELECT user_id FROM users WHERE is_registered=TRUE")
+    for user in users:
+        user_id = user["user_id"]
+        try:
+            report = await fetchrow(
+                """
+                SELECT *
+                FROM daily_reports
+                WHERE user_id=$1 AND report_date=CURRENT_DATE
+                """,
+                user_id
+            )
+
+            if not report:
+                continue
+
+            if "day_finished" in report and report["day_finished"]:
+                continue
+
+            await finish_day_for_user(user_id, message=None)
+
+        except Exception as e:
+            print("auto_finish_day_job error:", e)
+
+
+
 async def main():
     global pool
     for i in range(10):
@@ -1589,9 +1647,10 @@ async def main():
     scheduler.add_job(daily_reminder_job, "cron", hour=20, minute=0)
     scheduler.add_job(weekly_reminder_job, "cron", day_of_week="sun", hour=20, minute=30)
     scheduler.add_job(monthly_reminder_job, "cron", day=1, hour=9, minute=0)
+    scheduler.add_job(auto_finish_day_job, "cron", hour=0, minute=0)
     scheduler.start()
 
-    print("Fitness bot PostgreSQL safe v2.7 measurements menu started")
+    print("Fitness bot PostgreSQL safe v3.0 auto finish started")
     await dp.start_polling(bot)
 
 
