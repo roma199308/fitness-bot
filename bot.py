@@ -2,6 +2,8 @@
 import os
 import asyncio
 import random
+import matplotlib.pyplot as plt
+from io import BytesIO
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -751,6 +753,156 @@ async def week_history(message: Message):
 async def ai_week(message: Message):
     text = await build_week_ai_analysis(message.from_user.id)
     await message.answer(text)
+
+
+
+graphs_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="⚖️ Вес")],
+        [KeyboardButton(text="🍽 Калории"), KeyboardButton(text="🔥 Активность")],
+        [KeyboardButton(text="📏 Замеры")],
+        [KeyboardButton(text="⬅️ Назад")]
+    ],
+    resize_keyboard=True
+)
+
+
+async def send_plot(message, title, labels, values, ylabel):
+    if not labels or not values:
+        await message.answer("Недостаточно данных для графика.")
+        return
+
+    plt.figure(figsize=(8, 4))
+    plt.plot(labels, values, marker="o")
+    plt.title(title)
+    plt.ylabel(ylabel)
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+
+    buf = BytesIO()
+    plt.savefig(buf, format="png")
+    plt.close()
+
+    buf.seek(0)
+    await message.answer_photo(
+        photo=buf,
+        caption=title
+    )
+
+
+@dp.message(F.text == "📉 Графики")
+async def graphs_menu(message: Message):
+    await message.answer("Выбери график:", reply_markup=graphs_keyboard)
+
+
+@dp.message(F.text == "⚖️ Вес")
+async def graph_weight(message: Message):
+    rows = await fetch(
+        "SELECT weight_date, weight FROM weight_logs WHERE user_id=$1 ORDER BY weight_date DESC LIMIT 30",
+        message.from_user.id
+    )
+
+    rows = list(reversed(rows))
+
+    labels = [r["weight_date"].strftime("%d.%m") for r in rows]
+    values = [float(r["weight"]) for r in rows]
+
+    await send_plot(
+        message,
+        "⚖️ График веса",
+        labels,
+        values,
+        "кг"
+    )
+
+
+@dp.message(F.text == "🍽 Калории")
+async def graph_calories(message: Message):
+    rows = await fetch(
+        """
+        SELECT report_date, calories_in
+        FROM daily_reports
+        WHERE user_id=$1
+        AND calories_counted=TRUE
+        ORDER BY report_date DESC
+        LIMIT 30
+        """,
+        message.from_user.id
+    )
+
+    rows = list(reversed(rows))
+
+    labels = [r["report_date"].strftime("%d.%m") for r in rows]
+    values = [int(r["calories_in"] or 0) for r in rows]
+
+    await send_plot(
+        message,
+        "🍽 График калорий",
+        labels,
+        values,
+        "ккал"
+    )
+
+
+@dp.message(F.text == "🔥 Активность")
+async def graph_activity(message: Message):
+    rows = await fetch(
+        """
+        SELECT workout_date, SUM(calories_burned) AS total
+        FROM workouts
+        WHERE user_id=$1
+        GROUP BY workout_date
+        ORDER BY workout_date DESC
+        LIMIT 30
+        """,
+        message.from_user.id
+    )
+
+    rows = list(reversed(rows))
+
+    labels = [r["workout_date"].strftime("%d.%m") for r in rows]
+    values = [int(r["total"] or 0) for r in rows]
+
+    await send_plot(
+        message,
+        "🔥 График активности",
+        labels,
+        values,
+        "ккал"
+    )
+
+
+@dp.message(F.text == "📏 Замеры")
+async def graph_measurements(message: Message):
+    rows = await fetch(
+        """
+        SELECT measure_date, belly_cm
+        FROM body_measurements
+        WHERE user_id=$1
+        AND belly_cm IS NOT NULL
+        ORDER BY measure_date DESC
+        LIMIT 12
+        """,
+        message.from_user.id
+    )
+
+    rows = list(reversed(rows))
+
+    labels = [r["measure_date"].strftime("%m.%y") for r in rows]
+    values = [float(r["belly_cm"]) for r in rows]
+
+    await send_plot(
+        message,
+        "📏 Изменение живота",
+        labels,
+        values,
+        "см"
+    )
+
+
+@dp.message(F.text == "⬅️ Назад")
+async def back_main(message: Message):
+    await message.answer("Главное меню", reply_markup=main_keyboard)
 
 
 @dp.message(F.text == "⚙️ Настройки")
