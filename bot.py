@@ -57,6 +57,17 @@ measurements_keyboard = ReplyKeyboardMarkup(
     resize_keyboard=True
 )
 
+measurement_select_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="💪 Грудь"), KeyboardButton(text="💪 Бицепс")],
+        [KeyboardButton(text="✋ Предплечье"), KeyboardButton(text="🍔 Живот")],
+        [KeyboardButton(text="🍑 Таз"), KeyboardButton(text="🦵 Бедро")],
+        [KeyboardButton(text="🦵 Икра"), KeyboardButton(text="🧍 Шея")],
+        [KeyboardButton(text="⬅️ Назад")],
+    ],
+    resize_keyboard=True
+)
+
 workout_count_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="0 тренировок")],
@@ -730,12 +741,38 @@ async def measurements_menu(message: Message):
 
 
 @dp.message(F.text == "📥 Внести замеры")
-async def measurements_start(message: Message):
-    key = month_key()
-    existing = await fetchrow("SELECT id FROM body_measurements WHERE user_id=$1 AND measure_month=$2", message.from_user.id, key)
-    states[message.from_user.id] = {"flow": "measurements", "step": "chest_cm", "data": {"measure_month": key}}
-    prefix = "За этот месяц замеры уже есть. Новые значения заменят старые.\n\n" if existing else ""
-    await message.answer(prefix + "📏 Замеры месяца\n\n1/8 Грудь, см:")
+async def measurements_select_menu(message: Message):
+    await message.answer(
+        "📏 Что хочешь внести?\n\nВыбери параметр кнопкой, потом введи значение в сантиметрах.",
+        reply_markup=measurement_select_keyboard
+    )
+
+MEASUREMENT_FIELDS = {
+    "💪 Грудь": ("chest_cm", "Грудь"),
+    "💪 Бицепс": ("biceps_cm", "Бицепс"),
+    "✋ Предплечье": ("forearm_cm", "Предплечье"),
+    "🍔 Живот": ("belly_cm", "Живот"),
+    "🍑 Таз": ("hips_cm", "Таз"),
+    "🦵 Бедро": ("thigh_cm", "Бедро"),
+    "🦵 Икра": ("calf_cm", "Икра"),
+    "🧍 Шея": ("neck_cm", "Шея"),
+}
+
+
+@dp.message(F.text.in_(list(MEASUREMENT_FIELDS.keys())))
+async def measurement_field_selected(message: Message):
+    field, label = MEASUREMENT_FIELDS[message.text]
+    states[message.from_user.id] = {
+        "flow": "measurement_single",
+        "step": "value",
+        "data": {
+            "field": field,
+            "label": label,
+            "measure_month": month_key(),
+        }
+    }
+    await message.answer(f"📏 {label}\n\nВведи значение в см, например: 102.5")
+
 
 @dp.message(F.text == "📅 Отчет за месяц")
 async def month_report(message: Message):
@@ -934,10 +971,11 @@ async def back_main(message: Message):
 async def measurements_history(message: Message):
     rows = await fetch(
         """
-        SELECT measure_date, chest_cm, biceps_cm, forearm_cm, belly_cm, hips_cm, thigh_cm, calf_cm, neck_cm
+        SELECT measure_month, measure_date, chest_cm, biceps_cm, forearm_cm,
+               belly_cm, hips_cm, thigh_cm, calf_cm, neck_cm
         FROM body_measurements
         WHERE user_id=$1
-        ORDER BY measure_date DESC
+        ORDER BY measure_month DESC
         LIMIT 6
         """,
         message.from_user.id
@@ -950,20 +988,22 @@ async def measurements_history(message: Message):
     text = "🗂 <b>История замеров</b>\n\n"
 
     for row in rows:
-        text += (
-            f"📅 {row['measure_date'].strftime('%d.%m.%Y')}\n"
-            f"Грудь: {row['chest_cm'] or '—'} см\n"
-            f"Бицепс: {row['biceps_cm'] or '—'} см\n"
-            f"Предплечье: {row['forearm_cm'] or '—'} см\n"
-            f"Живот: {row['belly_cm'] or '—'} см\n"
-            f"Таз: {row['hips_cm'] or '—'} см\n"
-            f"Бедро: {row['thigh_cm'] or '—'} см\n"
-            f"Икра: {row['calf_cm'] or '—'} см\n"
-            f"Шея: {row['neck_cm'] or '—'} см\n\n"
-        )
+        text += f"📅 <b>{row['measure_month']}</b>\n"
+        values = [
+            ("Грудь", row["chest_cm"]),
+            ("Бицепс", row["biceps_cm"]),
+            ("Предплечье", row["forearm_cm"]),
+            ("Живот", row["belly_cm"]),
+            ("Таз", row["hips_cm"]),
+            ("Бедро", row["thigh_cm"]),
+            ("Икра", row["calf_cm"]),
+            ("Шея", row["neck_cm"]),
+        ]
+        filled = [f"{name}: {value:g} см" for name, value in values if value is not None]
+        text += "\n".join(filled) if filled else "нет данных"
+        text += "\n\n"
 
     await message.answer(text)
-
 
 @dp.message(F.text == "⚙️ Настройки")
 async def settings(message: Message):
@@ -1011,6 +1051,8 @@ async def handler(message: Message):
             await settings_flow(message, state, text)
         elif flow == "measurements":
             await measurements_flow(message, state, text)
+        elif flow == "measurement_single":
+            await measurement_single_flow(message, state, text)
         elif flow == "reset":
             await reset_flow(message, text)
     except ValueError:
@@ -1137,6 +1179,49 @@ async def settings_flow(message, state, text):
         await execute("UPDATE users SET daily_calorie_goal=$1 WHERE user_id=$2", value, user_id)
         await message.answer(f"✅ Лимит обновлен: {value} ккал", reply_markup=main_keyboard)
     states.pop(user_id, None)
+
+
+async def measurement_single_flow(message, state, text):
+    user_id = message.from_user.id
+    value = to_float(text)
+    data = state["data"]
+    field = data["field"]
+    label = data["label"]
+    key = data["measure_month"]
+
+    allowed_fields = {
+        "chest_cm", "biceps_cm", "forearm_cm", "belly_cm",
+        "hips_cm", "thigh_cm", "calf_cm", "neck_cm"
+    }
+
+    if field not in allowed_fields:
+        states.pop(user_id, None)
+        await message.answer("Ошибка параметра замера. Попробуй еще раз.", reply_markup=measurements_keyboard)
+        return
+
+    await execute(
+        """
+        INSERT INTO body_measurements(user_id, measure_month, measure_date)
+        VALUES($1, $2, CURRENT_DATE)
+        ON CONFLICT(user_id, measure_month) DO NOTHING
+        """,
+        user_id, key
+    )
+
+    await execute(
+        f"""
+        UPDATE body_measurements
+        SET {field}=$1, measure_date=CURRENT_DATE
+        WHERE user_id=$2 AND measure_month=$3
+        """,
+        value, user_id, key
+    )
+
+    states.pop(user_id, None)
+    await message.answer(
+        f"✅ {label}: {value:g} см сохранено за {key}.",
+        reply_markup=measurement_select_keyboard
+    )
 
 
 async def measurements_flow(message, state, text):
