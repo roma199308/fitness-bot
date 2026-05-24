@@ -282,6 +282,17 @@ async def create_tables():
     await execute("ALTER TABLE body_measurements ADD COLUMN IF NOT EXISTS neck_cm DOUBLE PRECISION")
 
 
+    await execute("""
+    CREATE TABLE IF NOT EXISTS sent_auto_reports (
+        id SERIAL PRIMARY KEY,
+        user_id BIGINT NOT NULL,
+        report_type TEXT NOT NULL,
+        report_key TEXT NOT NULL,
+        created_at TIMESTAMP DEFAULT NOW(),
+        UNIQUE(user_id, report_type, report_key)
+    )
+    """)
+
 
 async def ensure_user(user_id):
     await execute("INSERT INTO users(user_id) VALUES($1) ON CONFLICT (user_id) DO NOTHING", user_id)
@@ -868,9 +879,10 @@ async def month_history(message: Message):
 
 @dp.message(F.text == "📌 Отчет за неделю")
 async def week_report(message: Message):
-    text = await save_current_week_summary(message.from_user.id)
-    await message.answer(text)
-
+    week_text = await build_week_report_text_for_user(message.from_user.id)
+    ai_text = await build_week_ai_analysis(message.from_user.id)
+    await message.answer(week_text)
+    await message.answer(ai_text)
 
 @dp.message(F.text == "🗂 История недель")
 async def week_history(message: Message):
@@ -1677,11 +1689,292 @@ async def save_current_week_summary(user_id):
     return text
 
 
+WEEKDAY_NAMES = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+
+
+def is_last_day_of_month(d: date) -> bool:
+    return (d + timedelta(days=1)).day == 1
+
+
+def week_report_key(d: date | None = None) -> str:
+    d = d or date.today()
+    start = d - timedelta(days=d.weekday())
+    return start.strftime("%Y-%m-%d")
+
+
+async def was_auto_report_sent(user_id: int, report_type: str, report_key: str) -> bool:
+    row = await fetchrow(
+        "SELECT id FROM sent_auto_reports WHERE user_id=$1 AND report_type=$2 AND report_key=$3",
+        user_id, report_type, report_key
+    )
+    return bool(row)
+
+
+async def mark_auto_report_sent(user_id: int, report_type: str, report_key: str):
+    await execute(
+        """
+        INSERT INTO sent_auto_reports(user_id, report_type, report_key)
+        VALUES($1, $2, $3)
+        ON CONFLICT(user_id, report_type, report_key) DO NOTHING
+        """,
+        user_id, report_type, report_key
+    )
+
+
+async def build_week_report_text_for_user(user_id: int, d: date | None = None) -> str:
+    d = d or date.today()
+    week_start = d - timedelta(days=d.weekday())
+    week_end = week_start + timedelta(days=6)
+
+    reports = await fetch(
+        "SELECT * FROM daily_reports WHERE user_id=$1 AND report_date BETWEEN $2 AND $3 ORDER BY report_date",
+        user_id, week_start, week_end
+    )
+    workouts = await fetch(
+        """
+        SELECT workout_date, SUM(calories_burned) AS total, COUNT(*) AS cnt
+        FROM workouts
+        WHERE user_id=$1 AND workout_date BETWEEN $2 AND $3
+        GROUP BY workout_date
+        ORDER BY workout_date
+        """,
+        user_id, week_start, week_end
+    )
+    weights = await fetch(
+        "SELECT weight_date, weight FROM weight_logs WHERE user_id=$1 AND weight_date BETWEEN $2 AND $3 ORDER BY weight_date",
+        user_id, week_start, week_end
+    )
+
+    reports_by_date = {r["report_date"]: r for r in reports}
+    workouts_by_date = {w["workout_date"]: w for w in workouts}
+
+    lines = [
+        "📅 <b>Итоги недели</b>",
+        f"{week_start.strftime('%d.%m')} — {week_end.strftime('%d.%m')}",
+        "",
+        "📌 <b>По дням</b>"
+    ]
+
+    total_in = 0
+    total_out = 0
+    counted_days = 0
+    not_counted_days = 0
+    no_workout_days = 0
+    workout_count = 0
+
+    for i in range(7):
+        day = week_start + timedelta(days=i)
+        report = reports_by_date.get(day)
+        workout = workouts_by_date.get(day)
+
+        if report:
+            if report["calories_counted"]:
+                calories_text = f"{report['calories_in'] or 0} ккал"
+                total_in += report["calories_in"] or 0
+                counted_days += 1
+            else:
+                calories_text = "не считал"
+                not_counted_days += 1
+
+            if report["no_workout"]:
+                no_workout_days += 1
+        else:
+            calories_text = "нет отчета"
+
+        burned = int(workout["total"] or 0) if workout else 0
+        cnt = int(workout["cnt"] or 0) if workout else 0
+        total_out += burned
+        workout_count += cnt
+
+        lines.append(f"{WEEKDAY_NAMES[i]}: 🍽 {calories_text} / 🔥 {burned} ккал / 🏋️ {cnt}")
+
+    avg_in = round(total_in / counted_days) if counted_days else 0
+
+    weight_text = "нет данных"
+    if len(weights) >= 2:
+        w_start = weights[0]["weight"]
+        w_end = weights[-1]["weight"]
+        weight_text = f"{w_start:g} → {w_end:g} кг ({w_end - w_start:+.1f} кг)"
+    elif len(weights) == 1:
+        weight_text = f"{weights[0]['weight']:g} кг"
+
+    lines += [
+        "",
+        "📊 <b>Итого за неделю</b>",
+        f"🍽 Всего съедено: {total_in} ккал",
+        f"🍽 Среднее по дням подсчета: {avg_in} ккал/день",
+        f"🔥 Всего сожжено: {total_out} ккал",
+        f"🏋️ Тренировок: {workout_count}",
+        f"❔ Дней без подсчета: {not_counted_days}",
+        f"🚫 Дней без тренировки: {no_workout_days}",
+        f"⚖️ Вес: {weight_text}",
+    ]
+
+    text = "\n".join(lines)
+
+    await execute(
+        """
+        INSERT INTO weekly_summaries(user_id, week_start, week_end, total_calories_in, total_calories_out, not_counted_days, no_workout_days, summary_text)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+        ON CONFLICT(user_id, week_start, week_end) DO UPDATE SET
+            total_calories_in=EXCLUDED.total_calories_in,
+            total_calories_out=EXCLUDED.total_calories_out,
+            not_counted_days=EXCLUDED.not_counted_days,
+            no_workout_days=EXCLUDED.no_workout_days,
+            summary_text=EXCLUDED.summary_text
+        """,
+        user_id, week_start, week_end, total_in, total_out, not_counted_days, no_workout_days, text
+    )
+    return text
+
+
+async def build_month_report_text_for_user(user_id: int, key: str | None = None) -> str:
+    key = key or month_key()
+    prev_key = previous_month_key()
+    s = await monthly_stats(user_id, key)
+    p = await monthly_stats(user_id, prev_key)
+
+    w_text = "нет данных"
+    if s["weights"]:
+        w_start = s["weights"][0]["weight"]
+        w_end = s["weights"][-1]["weight"]
+        w_text = f"{w_start:g} → {w_end:g} кг ({w_end - w_start:+.1f} кг)"
+
+    lines = [
+        f"📆 <b>Итоги месяца {key}</b>",
+        "",
+        f"🍽 Съедено: {s['total_in']} ккал",
+        f"🍽 Среднее по дням подсчета: {s['avg_in']} ккал/день",
+        f"❔ Дней без подсчета калорий: {s['not_counted']}",
+        "",
+        f"🔥 Сожжено: {s['total_out']} ккал",
+        f"🏋️ Тренировок: {len(s['workouts'])}",
+        f"🚫 Дней без тренировки: {s['no_workout']}",
+        "",
+        f"⚖️ Вес: {w_text}",
+        "",
+        "📏 <b>Замеры</b>",
+        meas_line("Грудь", "chest_cm", s["meas"], p["meas"]),
+        meas_line("Бицепс", "biceps_cm", s["meas"], p["meas"]),
+        meas_line("Предплечье", "forearm_cm", s["meas"], p["meas"]),
+        meas_line("Живот", "belly_cm", s["meas"], p["meas"]),
+        meas_line("Таз", "hips_cm", s["meas"], p["meas"]),
+        meas_line("Бедро", "thigh_cm", s["meas"], p["meas"]),
+        meas_line("Икра", "calf_cm", s["meas"], p["meas"]),
+        meas_line("Шея", "neck_cm", s["meas"], p["meas"]),
+    ]
+
+    text = "\n".join(lines)
+
+    await execute(
+        """
+        INSERT INTO monthly_reports(user_id, report_month, report_text)
+        VALUES($1,$2,$3)
+        ON CONFLICT(user_id, report_month) DO UPDATE SET report_text=EXCLUDED.report_text, created_at=NOW()
+        """,
+        user_id, key, text
+    )
+    return text
+
+
+async def auto_weekly_report_job():
+    users = await fetch("SELECT user_id FROM users WHERE is_registered=TRUE")
+    key = week_report_key()
+
+    for user in users:
+        user_id = user["user_id"]
+        try:
+            if await was_auto_report_sent(user_id, "weekly", key):
+                continue
+
+            week_text = await build_week_report_text_for_user(user_id)
+            ai_text = await build_week_ai_analysis(user_id)
+
+            await bot.send_message(user_id, week_text)
+            await bot.send_message(user_id, ai_text)
+
+            await mark_auto_report_sent(user_id, "weekly", key)
+        except Exception as e:
+            print("auto_weekly_report_job error:", e)
+
+
+async def auto_monthly_report_job():
+    today = date.today()
+    if not is_last_day_of_month(today):
+        return
+
+    key = month_key(today)
+    users = await fetch("SELECT user_id FROM users WHERE is_registered=TRUE")
+
+    for user in users:
+        user_id = user["user_id"]
+        try:
+            if await was_auto_report_sent(user_id, "monthly", key):
+                continue
+
+            report_text = await build_month_report_text_for_user(user_id, key)
+            await bot.send_message(user_id, report_text)
+
+            await mark_auto_report_sent(user_id, "monthly", key)
+        except Exception as e:
+            print("auto_monthly_report_job error:", e)
+
+
+
 async def daily_reminder_job():
     users = await fetch("SELECT user_id FROM users WHERE is_registered=TRUE")
+
     for user in users:
+        user_id = user["user_id"]
+
         try:
-            await bot.send_message(user["user_id"], "⏰ Напоминание: внеси отчет за день — калории и тренировки.", reply_markup=main_keyboard)
+            report = await fetchrow(
+                """
+                SELECT *
+                FROM daily_reports
+                WHERE user_id=$1 AND report_date=CURRENT_DATE
+                """,
+                user_id
+            )
+
+            # Если день уже завершен — не напоминаем
+            if report and "day_finished" in report and report["day_finished"]:
+                continue
+
+            # Если есть отчет и в нем уже внесены калории или тренировка — мягкое напоминание завершить день
+            workouts = await fetch(
+                """
+                SELECT id
+                FROM workouts
+                WHERE user_id=$1 AND workout_date=CURRENT_DATE
+                LIMIT 1
+                """,
+                user_id
+            )
+
+            has_data = bool(
+                report and (
+                    report["calories_counted"]
+                    or report["no_workout"]
+                    or workouts
+                )
+            )
+
+            if has_data:
+                text = (
+                    "⏰ Ты уже начал отчет за день.\n\n"
+                    "Не забудь нажать <b>✅ Завершить день</b>, "
+                    "чтобы бот посчитал итог и AI-анализ."
+                )
+            else:
+                text = "⏰ Напоминание: внеси отчет за день — калории и тренировки."
+
+            await bot.send_message(
+                user_id,
+                text,
+                reply_markup=main_keyboard,
+            )
+
         except Exception as e:
             print("daily_reminder error:", e)
 
@@ -1824,9 +2117,11 @@ async def main():
     scheduler.add_job(weekly_reminder_job, "cron", day_of_week="sun", hour=20, minute=30)
     scheduler.add_job(monthly_reminder_job, "cron", day=1, hour=9, minute=0)
     scheduler.add_job(auto_finish_day_job, "cron", hour=0, minute=0)
+    scheduler.add_job(auto_weekly_report_job, "cron", day_of_week="sun", hour=23, minute=0)
+    scheduler.add_job(auto_monthly_report_job, "cron", hour=23, minute=0)
     scheduler.start()
 
-    print("Fitness bot PostgreSQL safe v3.1 graphs v2 started")
+    print("Fitness bot PostgreSQL safe v3.3 smart reminders started")
     await dp.start_polling(bot)
 
 
