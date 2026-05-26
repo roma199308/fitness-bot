@@ -1,9 +1,12 @@
-Fitness Bot PostgreSQL Safe v3.3 Smart Reminders
+Fitness Bot PostgreSQL Safe v3.4 Intelligent Coach
 
 Добавлено:
-- ежедневное напоминание НЕ приходит, если день уже завершен
-- если отчет начат, но не завершен — приходит мягкое напоминание нажать ✅ Завершить день
-- если данных за день нет — обычное напоминание внести отчет
+- Prediction Engine
+- Smart AI Coach
+- Dashboard v2
+- Adaptive reminders
+- кнопка 🧠 Smart Coach
+- команда /coach
 
 Без сброса базы.
 Синтаксис проверен.

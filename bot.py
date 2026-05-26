@@ -43,6 +43,7 @@ main_keyboard = ReplyKeyboardMarkup(
         [KeyboardButton(text="🧠 AI-анализ недели"), KeyboardButton(text="🗂 История недель")],
         [KeyboardButton(text="📌 Отчет за неделю")],
         [KeyboardButton(text="📉 Графики")],
+        [KeyboardButton(text="🧠 Smart Coach")],
         [KeyboardButton(text="⚙️ Настройки")],
     ],
     resize_keyboard=True
@@ -1269,6 +1270,19 @@ async def back_main(message: Message):
     await message.answer("Главное меню", reply_markup=main_keyboard)
 
 
+
+@dp.message(Command("coach"))
+async def smart_coach_command(message: Message):
+    await message.answer(await build_dashboard_v2(message.from_user.id))
+    await message.answer(await build_smart_ai_coach(message.from_user.id))
+
+
+@dp.message(F.text == "🧠 Smart Coach")
+async def smart_coach_button(message: Message):
+    await message.answer(await build_dashboard_v2(message.from_user.id))
+    await message.answer(await build_smart_ai_coach(message.from_user.id))
+
+
 @dp.message(F.text == "⚙️ Настройки")
 async def settings(message: Message):
     await message.answer("⚙️ Настройки:", reply_markup=settings_keyboard)
@@ -2096,6 +2110,251 @@ async def auto_finish_day_job():
 
 
 
+
+def calc_weight_prediction_days(current_weight: float, target_weight: float, weekly_delta: float):
+    if weekly_delta >= 0:
+        return None
+
+    left = current_weight - target_weight
+    if left <= 0:
+        return 0
+
+    per_day = abs(weekly_delta) / 7
+    if per_day <= 0:
+        return None
+
+    return int(left / per_day)
+
+
+async def build_smart_ai_coach(user_id: int) -> str:
+    reports = await fetch(
+        """
+        SELECT report_date, calories_in, calories_counted
+        FROM daily_reports
+        WHERE user_id=$1
+        ORDER BY report_date DESC
+        LIMIT 14
+        """,
+        user_id
+    )
+
+    weights = await fetch(
+        """
+        SELECT weight_date, weight
+        FROM weight_logs
+        WHERE user_id=$1
+        ORDER BY weight_date DESC
+        LIMIT 14
+        """,
+        user_id
+    )
+
+    workouts = await fetch(
+        """
+        SELECT workout_date, SUM(calories_burned) AS total
+        FROM workouts
+        WHERE user_id=$1
+        GROUP BY workout_date
+        ORDER BY workout_date DESC
+        LIMIT 14
+        """,
+        user_id
+    )
+
+    notes = []
+
+    weekend = []
+    weekdays = []
+
+    for r in reports:
+        if not r["calories_counted"] or not r["calories_in"]:
+            continue
+
+        if r["report_date"].weekday() >= 5:
+            weekend.append(r["calories_in"])
+        else:
+            weekdays.append(r["calories_in"])
+
+    if weekend and weekdays:
+        weekend_avg = sum(weekend) / len(weekend)
+        weekday_avg = sum(weekdays) / len(weekdays)
+
+        if weekend_avg - weekday_avg >= 250:
+            notes.append("🍕 Основные переборы чаще происходят по выходным.")
+        elif weekday_avg - weekend_avg >= 250:
+            notes.append("📌 В будни калорий больше, чем на выходных — стоит проверить рабочий режим питания.")
+
+    if workouts and len(workouts) >= 4:
+        avg_burn = sum(int(w["total"] or 0) for w in workouts) / len(workouts)
+
+        if avg_burn >= 500:
+            notes.append("🔥 Активность держится на хорошем уровне.")
+        elif avg_burn < 300:
+            notes.append("🏋️ Активность пока низкая — даже +150–200 ккал движения в день могут помочь.")
+
+    if len(weights) >= 2:
+        current = float(weights[0]["weight"])
+        old = float(weights[-1]["weight"])
+        delta = current - old
+
+        if delta <= -1:
+            notes.append("⚖️ Вес уверенно снижается.")
+        elif delta >= 1:
+            notes.append("⚠️ Вес вырос за последние замеры — возможно, питание/вода/соль дают откат.")
+        elif abs(delta) <= 0.3:
+            notes.append("🟡 Вес почти стоит — возможно плато или задержка воды.")
+
+    if not notes:
+        notes.append("🧠 Данных пока мало для глубоких выводов. Продолжай вносить отчеты — анализ станет точнее.")
+
+    return "🧠 <b>Smart AI Coach</b>\n\n" + "\n".join(notes)
+
+
+async def build_dashboard_v2(user_id: int) -> str:
+    user = await get_user(user_id)
+
+    reports = await fetch(
+        """
+        SELECT *
+        FROM daily_reports
+        WHERE user_id=$1
+        ORDER BY report_date DESC
+        LIMIT 7
+        """,
+        user_id
+    )
+
+    workouts = await fetch(
+        """
+        SELECT SUM(calories_burned) AS total
+        FROM workouts
+        WHERE user_id=$1
+        AND workout_date >= CURRENT_DATE - INTERVAL '7 days'
+        GROUP BY workout_date
+        """,
+        user_id
+    )
+
+    weights = await fetch(
+        """
+        SELECT weight_date, weight
+        FROM weight_logs
+        WHERE user_id=$1
+        ORDER BY weight_date DESC
+        LIMIT 7
+        """,
+        user_id
+    )
+
+    avg_calories = 0
+    counted = [r["calories_in"] for r in reports if r["calories_counted"] and r["calories_in"]]
+    if counted:
+        avg_calories = int(sum(counted) / len(counted))
+
+    avg_burn = 0
+    if workouts:
+        avg_burn = int(sum(int(w["total"] or 0) for w in workouts) / len(workouts))
+
+    trend = "нет данных"
+    prediction = "недостаточно данных"
+
+    if len(weights) >= 2:
+        current = float(weights[0]["weight"])
+        old = float(weights[-1]["weight"])
+        days_between = max(1, (weights[0]["weight_date"] - weights[-1]["weight_date"]).days)
+
+        delta = current - old
+        weekly_delta = delta / days_between * 7
+        trend = f"{weekly_delta:+.1f} кг/нед"
+
+        target = user["target_weight"] if user and user["target_weight"] else None
+        if target:
+            days = calc_weight_prediction_days(current, float(target), weekly_delta)
+
+            if days == 0:
+                prediction = "цель достигнута 🎉"
+            elif days:
+                prediction = f"≈ {days} дней"
+
+    return (
+        "📊 <b>Dashboard v2</b>\n\n"
+        f"⚖️ Тренд веса: {trend}\n"
+        f"🔥 Средняя активность: {avg_burn} ккал\n"
+        f"🍽 Средние калории: {avg_calories} ккал\n"
+        f"🎯 Цель: {prediction}"
+    )
+
+
+async def adaptive_reminder_job():
+    users = await fetch("SELECT user_id FROM users WHERE is_registered=TRUE")
+
+    for user in users:
+        user_id = user["user_id"]
+
+        try:
+            recent_reports = await fetch(
+                """
+                SELECT report_date
+                FROM daily_reports
+                WHERE user_id=$1
+                ORDER BY report_date DESC
+                LIMIT 2
+                """,
+                user_id
+            )
+
+            if recent_reports:
+                last_day = recent_reports[0]["report_date"]
+
+                if (date.today() - last_day).days >= 2:
+                    await bot.send_message(
+                        user_id,
+                        "👀 Давно не было отчетов. Возвращаемся в режим?"
+                    )
+                    continue
+
+            today_report = await fetchrow(
+                """
+                SELECT *
+                FROM daily_reports
+                WHERE user_id=$1 AND report_date=CURRENT_DATE
+                """,
+                user_id
+            )
+
+            if not today_report:
+                continue
+
+            if today_report and "day_finished" in today_report and today_report["day_finished"]:
+                continue
+
+            messages = []
+
+            if not today_report["calories_counted"]:
+                messages.append("🍽 Сегодня еще нет калорий.")
+
+            workouts = await fetch(
+                """
+                SELECT id
+                FROM workouts
+                WHERE user_id=$1
+                AND workout_date=CURRENT_DATE
+                LIMIT 1
+                """,
+                user_id
+            )
+
+            if not workouts and not today_report["no_workout"]:
+                messages.append("🏋️ Сегодня еще нет активности.")
+
+            if messages:
+                await bot.send_message(user_id, "\n".join(messages))
+
+        except Exception as e:
+            print("adaptive_reminder_job error:", e)
+
+
+
 async def main():
     global pool
     for i in range(10):
@@ -2119,9 +2378,10 @@ async def main():
     scheduler.add_job(auto_finish_day_job, "cron", hour=0, minute=0)
     scheduler.add_job(auto_weekly_report_job, "cron", day_of_week="sun", hour=23, minute=0)
     scheduler.add_job(auto_monthly_report_job, "cron", hour=23, minute=0)
+    scheduler.add_job(adaptive_reminder_job, "cron", hour=20, minute=0)
     scheduler.start()
 
-    print("Fitness bot PostgreSQL safe v3.3 smart reminders started")
+    print("Fitness bot PostgreSQL safe v3.4 intelligent coach started")
     await dp.start_polling(bot)
 
 
