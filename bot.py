@@ -36,15 +36,10 @@ states = {}
 
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="📝 Внести отчет за день")],
-        [KeyboardButton(text="📊 Мини-дашборд"), KeyboardButton(text="📈 Прогноз цели")],
-        [KeyboardButton(text="⚖️ Внести вес"), KeyboardButton(text="📏 Замеры")],
-        [KeyboardButton(text="📅 Отчет за месяц"), KeyboardButton(text="🗂 История месяцев")],
-        [KeyboardButton(text="🧠 AI-анализ недели"), KeyboardButton(text="🗂 История недель")],
-        [KeyboardButton(text="📌 Отчет за неделю")],
-        [KeyboardButton(text="📉 Графики")],
-        [KeyboardButton(text="🧠 Smart Coach")],
-        [KeyboardButton(text="⚙️ Настройки")],
+        [KeyboardButton(text="📝 Отчет за день"), KeyboardButton(text="📊 Dashboard")],
+        [KeyboardButton(text="📈 Аналитика"), KeyboardButton(text="📉 Графики")],
+        [KeyboardButton(text="📏 Замеры")],
+        [KeyboardButton(text="⚙️ Настройки")]
     ],
     resize_keyboard=True
 )
@@ -902,6 +897,18 @@ async def ai_week(message: Message):
 
 
 
+
+analytics_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🧠 Smart Coach")],
+        [KeyboardButton(text="📌 Отчет за неделю")],
+        [KeyboardButton(text="📅 Отчет за месяц")],
+        [KeyboardButton(text="🗂 История недель"), KeyboardButton(text="🗂 История месяцев")],
+        [KeyboardButton(text="⬅️ Назад")]
+    ],
+    resize_keyboard=True
+)
+
 graphs_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="⚖️ Вес")],
@@ -1054,6 +1061,22 @@ def measurements_graph_ai(rows):
         "🧠 <b>AI-анализ замеров</b>\n\n"
         "Изменения за период:\n" +
         "\n".join(f"— {n}" for n in notes)
+    )
+
+
+
+
+@dp.message(F.text == "📊 Dashboard")
+async def dashboard_v2_button(message: Message):
+    await message.answer(await build_dashboard_v2(message.from_user.id))
+    await message.answer(await build_smart_ai_coach(message.from_user.id))
+
+
+@dp.message(F.text == "📈 Аналитика")
+async def analytics_menu(message: Message):
+    await message.answer(
+        "📈 Раздел аналитики",
+        reply_markup=analytics_keyboard
     )
 
 
@@ -2381,7 +2404,7 @@ async def main():
     scheduler.add_job(adaptive_reminder_job, "cron", hour=20, minute=0)
     scheduler.start()
 
-    print("Fitness bot PostgreSQL safe v3.4 intelligent coach started")
+    print("Fitness bot PostgreSQL safe v3.5 compact menu started")
     await dp.start_polling(bot)
 
 
