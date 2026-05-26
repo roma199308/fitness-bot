@@ -36,10 +36,15 @@ states = {}
 
 main_keyboard = ReplyKeyboardMarkup(
     keyboard=[
-        [KeyboardButton(text="📝 Отчет за день"), KeyboardButton(text="📊 Dashboard")],
-        [KeyboardButton(text="📈 Аналитика"), KeyboardButton(text="📉 Графики")],
-        [KeyboardButton(text="📏 Замеры")],
-        [KeyboardButton(text="⚙️ Настройки")]
+        [KeyboardButton(text="📝 Внести отчет за день")],
+        [KeyboardButton(text="📊 Мини-дашборд"), KeyboardButton(text="📈 Прогноз цели")],
+        [KeyboardButton(text="⚖️ Внести вес"), KeyboardButton(text="📏 Замеры")],
+        [KeyboardButton(text="📅 Отчет за месяц"), KeyboardButton(text="🗂 История месяцев")],
+        [KeyboardButton(text="🧠 AI-анализ недели"), KeyboardButton(text="🗂 История недель")],
+        [KeyboardButton(text="📌 Отчет за неделю")],
+        [KeyboardButton(text="📉 Графики")],
+        [KeyboardButton(text="🧠 Smart Coach"), KeyboardButton(text="📊 Dashboard v3")],
+        [KeyboardButton(text="⚙️ Настройки")],
     ],
     resize_keyboard=True
 )
@@ -897,18 +902,6 @@ async def ai_week(message: Message):
 
 
 
-
-analytics_keyboard = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="🧠 Smart Coach")],
-        [KeyboardButton(text="📌 Отчет за неделю")],
-        [KeyboardButton(text="📅 Отчет за месяц")],
-        [KeyboardButton(text="🗂 История недель"), KeyboardButton(text="🗂 История месяцев")],
-        [KeyboardButton(text="⬅️ Назад")]
-    ],
-    resize_keyboard=True
-)
-
 graphs_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="⚖️ Вес")],
@@ -1061,22 +1054,6 @@ def measurements_graph_ai(rows):
         "🧠 <b>AI-анализ замеров</b>\n\n"
         "Изменения за период:\n" +
         "\n".join(f"— {n}" for n in notes)
-    )
-
-
-
-
-@dp.message(F.text == "📊 Dashboard")
-async def dashboard_v2_button(message: Message):
-    await message.answer(await build_dashboard_v2(message.from_user.id))
-    await message.answer(await build_smart_ai_coach(message.from_user.id))
-
-
-@dp.message(F.text == "📈 Аналитика")
-async def analytics_menu(message: Message):
-    await message.answer(
-        "📈 Раздел аналитики",
-        reply_markup=analytics_keyboard
     )
 
 
@@ -1296,14 +1273,29 @@ async def back_main(message: Message):
 
 @dp.message(Command("coach"))
 async def smart_coach_command(message: Message):
-    await message.answer(await build_dashboard_v2(message.from_user.id))
+    await message.answer(await build_dashboard_v3(message.from_user.id))
     await message.answer(await build_smart_ai_coach(message.from_user.id))
+    await message.answer(await build_coach_personality(message.from_user.id))
 
 
 @dp.message(F.text == "🧠 Smart Coach")
 async def smart_coach_button(message: Message):
-    await message.answer(await build_dashboard_v2(message.from_user.id))
+    await message.answer(await build_dashboard_v3(message.from_user.id))
     await message.answer(await build_smart_ai_coach(message.from_user.id))
+    await message.answer(await build_coach_personality(message.from_user.id))
+
+
+
+@dp.message(Command("score"))
+async def score_command(message: Message):
+    await message.answer(await build_dashboard_v3(message.from_user.id))
+    await message.answer(await build_coach_personality(message.from_user.id))
+
+
+@dp.message(F.text == "📊 Dashboard v3")
+async def dashboard_v3_button(message: Message):
+    await message.answer(await build_dashboard_v3(message.from_user.id))
+    await message.answer(await build_coach_personality(message.from_user.id))
 
 
 @dp.message(F.text == "⚙️ Настройки")
@@ -2378,6 +2370,159 @@ async def adaptive_reminder_job():
 
 
 
+def visual_bar(percent: float, size: int = 10) -> str:
+    percent = max(0, min(100, percent))
+    filled = round(percent / 100 * size)
+    return "█" * filled + "░" * (size - filled) + f" {percent:.0f}%"
+
+
+def fitness_score_label(score: int) -> str:
+    if score >= 85:
+        return "🟢 Сильный режим"
+    if score >= 70:
+        return "🟡 Хороший темп"
+    if score >= 50:
+        return "🟠 Средне"
+    return "🔴 Нужно подтянуть"
+
+
+async def build_fitness_score(user_id: int) -> dict:
+    user = await get_user(user_id)
+    goal = user["daily_calorie_goal"] or 1600
+
+    reports = await fetch(
+        "SELECT * FROM daily_reports WHERE user_id=$1 ORDER BY report_date DESC LIMIT 7",
+        user_id
+    )
+
+    workouts = await fetch(
+        """
+        SELECT workout_date, SUM(calories_burned) AS total
+        FROM workouts
+        WHERE user_id=$1 AND workout_date >= CURRENT_DATE - INTERVAL '7 days'
+        GROUP BY workout_date
+        """,
+        user_id
+    )
+
+    weights = await fetch(
+        "SELECT weight_date, weight FROM weight_logs WHERE user_id=$1 ORDER BY weight_date DESC LIMIT 7",
+        user_id
+    )
+
+    counted = [r for r in reports if r["calories_counted"] and r["calories_in"]]
+    days_with_report = len(reports)
+
+    food_score = 0
+    if counted:
+        in_limit = sum(1 for r in counted if (r["calories_in"] or 0) <= goal)
+        food_score = round(in_limit / len(counted) * 100)
+
+    activity_score = 0
+    if workouts:
+        avg_burn = sum(int(w["total"] or 0) for w in workouts) / len(workouts)
+        activity_score = min(100, round(avg_burn / 600 * 100))
+
+    discipline_score = min(100, round(days_with_report / 7 * 100))
+
+    progress_score = 50
+    if len(weights) >= 2:
+        current = float(weights[0]["weight"])
+        old = float(weights[-1]["weight"])
+        delta = current - old
+        if delta < -0.7:
+            progress_score = 100
+        elif delta < -0.2:
+            progress_score = 80
+        elif abs(delta) <= 0.2:
+            progress_score = 55
+        elif delta > 0.5:
+            progress_score = 30
+
+    total = round(food_score * 0.35 + activity_score * 0.25 + discipline_score * 0.20 + progress_score * 0.20)
+
+    return {
+        "total": total,
+        "food": food_score,
+        "activity": activity_score,
+        "discipline": discipline_score,
+        "progress": progress_score,
+        "label": fitness_score_label(total)
+    }
+
+
+async def build_dashboard_v3(user_id: int) -> str:
+    user = await get_user(user_id)
+    score = await build_fitness_score(user_id)
+    total, lost, left, percent = calc_progress(user)
+    v2 = await build_dashboard_v2(user_id)
+
+    return (
+        "📊 <b>Dashboard v3</b>\n\n"
+        f"🏆 Fitness Score: <b>{score['total']}/100</b> {score['label']}\n"
+        f"{visual_bar(score['total'])}\n\n"
+        f"🎯 Прогресс цели:\n{visual_bar(percent)}\n"
+        f"✅ Сброшено: {lost:.1f} кг\n"
+        f"📌 Осталось: {left:.1f} кг\n\n"
+        f"🍽 Питание: {score['food']}/100\n"
+        f"🏋️ Активность: {score['activity']}/100\n"
+        f"🔥 Дисциплина: {score['discipline']}/100\n"
+        f"📉 Прогресс веса: {score['progress']}/100\n\n"
+        f"{v2}"
+    )
+
+
+async def build_coach_personality(user_id: int) -> str:
+    score = await build_fitness_score(user_id)
+
+    weights = await fetch(
+        "SELECT weight_date, weight FROM weight_logs WHERE user_id=$1 ORDER BY weight_date DESC LIMIT 14",
+        user_id
+    )
+
+    reports = await fetch(
+        "SELECT report_date, calories_counted FROM daily_reports WHERE user_id=$1 ORDER BY report_date DESC LIMIT 7",
+        user_id
+    )
+
+    messages = []
+
+    if score["total"] >= 85:
+        messages.append("🔥 Сейчас режим выглядит очень сильным. Главное — не усложнять и держать темп.")
+    elif score["total"] >= 70:
+        messages.append("🟡 Темп хороший. Есть база, которую можно усиливать точечно.")
+    else:
+        messages.append("🔴 Сейчас нужен простой стабильный день: калории + активность.")
+
+    if score["food"] >= 80:
+        messages.append("🍽 Питание стало сильной стороной.")
+    elif score["food"] < 50:
+        messages.append("🍽 Главная точка роста — держать калории ближе к лимиту.")
+
+    if score["activity"] >= 80:
+        messages.append("🏋️ Активность хорошо поддерживает дефицит.")
+    elif score["activity"] < 50:
+        messages.append("🏋️ Активность можно поднять без перегруза: прогулка, велик или короткая тренировка.")
+
+    if len(weights) >= 2:
+        current = float(weights[0]["weight"])
+        old = float(weights[-1]["weight"])
+        delta = current - old
+
+        if delta < -1:
+            messages.append("⚖️ Вес двигается вниз заметно — это хороший сигнал.")
+        elif abs(delta) <= 0.3:
+            messages.append("⚖️ Вес почти стоит. Иногда тело просто держит воду.")
+
+    if len(reports) >= 5:
+        counted_days = sum(1 for r in reports if r["calories_counted"])
+        if counted_days >= 5:
+            messages.append("📌 Последние дни выглядят дисциплинированно по учету.")
+
+    return "🧠 <b>Coach Personality</b>\n\n" + "\n".join(messages)
+
+
+
 async def main():
     global pool
     for i in range(10):
@@ -2404,7 +2549,7 @@ async def main():
     scheduler.add_job(adaptive_reminder_job, "cron", hour=20, minute=0)
     scheduler.start()
 
-    print("Fitness bot PostgreSQL safe v3.5 compact menu started")
+    print("Fitness bot PostgreSQL safe v3.5 score dashboard started")
     await dp.start_polling(bot)
 
 
