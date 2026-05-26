@@ -73,6 +73,7 @@ measurement_select_keyboard = ReplyKeyboardMarkup(
 report_keyboard = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🍽 Внести калории")],
+        [KeyboardButton(text="🔄 Сбросить калории за день")],
         [KeyboardButton(text="🏋️ Внести тренировку")],
         [KeyboardButton(text="🚫 Не было тренировки")],
         [KeyboardButton(text="❔ Не считал калории")],
@@ -767,6 +768,27 @@ async def ensure_today_report(user_id: int):
     )
 
 
+@dp.message(F.text == "🔄 Сбросить калории за день")
+async def reset_today_calories(message: Message):
+    await ensure_today_report(message.from_user.id)
+
+    await execute(
+        """
+        UPDATE daily_reports
+        SET calories_in=0,
+            calories_counted=TRUE,
+            day_finished=FALSE
+        WHERE user_id=$1 AND report_date=CURRENT_DATE
+        """,
+        message.from_user.id
+    )
+
+    await message.answer(
+        "✅ Калории за сегодня сброшены до 0.",
+        reply_markup=report_keyboard
+    )
+
+
 @dp.message(F.text == "🍽 Внести калории")
 async def calories_start(message: Message):
     await ensure_today_report(message.from_user.id)
@@ -1397,14 +1419,30 @@ async def report_menu_flow(message, state, text):
         await execute(
             """
             UPDATE daily_reports
-            SET calories_in=$1, calories_counted=TRUE, day_finished=FALSE
+            SET calories_in=COALESCE(calories_in, 0) + $1,
+                calories_counted=TRUE,
+                day_finished=FALSE
             WHERE user_id=$2 AND report_date=CURRENT_DATE
             """,
             calories,
             user_id
         )
+        updated = await fetchrow(
+            """
+            SELECT calories_in
+            FROM daily_reports
+            WHERE user_id=$1 AND report_date=CURRENT_DATE
+            """,
+            user_id
+        )
+
+        total_calories = updated["calories_in"] if updated else calories
+
         states.pop(user_id, None)
-        await message.answer(f"✅ Калории сохранены: {calories} ккал", reply_markup=report_keyboard)
+        await message.answer(
+            f"✅ Добавил: {calories} ккал\n🍽 Итого за день: {total_calories} ккал",
+            reply_markup=report_keyboard
+        )
         return
 
     if step == "workout_type":
@@ -2549,7 +2587,7 @@ async def main():
     scheduler.add_job(adaptive_reminder_job, "cron", hour=20, minute=0)
     scheduler.start()
 
-    print("Fitness bot PostgreSQL safe v3.5 score dashboard started")
+    print("Fitness bot PostgreSQL safe v3.6 calories add started")
     await dp.start_polling(bot)
 
 
