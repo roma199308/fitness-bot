@@ -2584,7 +2584,7 @@ async def main():
     scheduler.add_job(auto_finish_day_job, "cron", hour=0, minute=0)
     scheduler.add_job(auto_weekly_report_job, "cron", day_of_week="sun", hour=23, minute=0)
     scheduler.add_job(auto_monthly_report_job, "cron", hour=23, minute=0)
-    scheduler.add_job(adaptive_reminder_job, "cron", hour=20, minute=0)
+    scheduler.add_job(adaptive_reminder_job, "cron", hour=22, minute=0)
     scheduler.start()
 
     print("Fitness bot PostgreSQL safe v3.6 calories add started")
